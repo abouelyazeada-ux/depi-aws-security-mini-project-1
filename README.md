@@ -1,0 +1,1 @@
+# Mini Project 1 — Secure AWS Web Platform (Terraform)
