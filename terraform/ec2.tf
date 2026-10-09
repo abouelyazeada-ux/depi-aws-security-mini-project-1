@@ -25,13 +25,23 @@ resource "aws_instance" "app_a" {
   vpc_security_group_ids      = [aws_security_group.app_sg.id]
   iam_instance_profile        = aws_iam_instance_profile.ec2_profile.name
   associate_public_ip_address = false
+  depends_on                  = [aws_efs_mount_target.efs_mt_a, aws_efs_mount_target.efs_mt_b]
+
+  root_block_device {
+    encrypted   = true
+    volume_type = "gp3"
+  }
 
   user_data = <<-EOF
     #!/bin/bash
     dnf update -y
-    dnf install -y nginx
+    dnf install -y nginx amazon-efs-utils
     systemctl enable nginx
     systemctl start nginx
+
+    mkdir -p /mnt/shared
+    echo "${aws_efs_file_system.efs.id} /mnt/shared efs _netdev,noresvport,tls,accesspoint=${aws_efs_access_point.efs_ap.id} 0 0" >> /etc/fstab
+    mount -a -t efs
 
     TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
     AZ=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" -s http://169.254.169.254/latest/meta-data/placement/availability-zone)
@@ -60,13 +70,23 @@ resource "aws_instance" "app_b" {
   vpc_security_group_ids      = [aws_security_group.app_sg.id]
   iam_instance_profile        = aws_iam_instance_profile.ec2_profile.name
   associate_public_ip_address = false
+  depends_on                  = [aws_efs_mount_target.efs_mt_a, aws_efs_mount_target.efs_mt_b]
+
+  root_block_device {
+    encrypted   = true
+    volume_type = "gp3"
+  }
 
   user_data = <<-EOF
     #!/bin/bash
     dnf update -y
-    dnf install -y nginx
+    dnf install -y nginx amazon-efs-utils
     systemctl enable nginx
     systemctl start nginx
+
+    mkdir -p /mnt/shared
+    echo "${aws_efs_file_system.efs.id} /mnt/shared efs _netdev,noresvport,tls,accesspoint=${aws_efs_access_point.efs_ap.id} 0 0" >> /etc/fstab
+    mount -a -t efs
 
     TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
     AZ=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" -s http://169.254.169.254/latest/meta-data/placement/availability-zone)
