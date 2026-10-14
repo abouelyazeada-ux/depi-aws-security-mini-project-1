@@ -61,6 +61,10 @@ resource "aws_instance" "app_a" {
   tags = {
     Name = "depi-sec-app-a"
   }
+
+  lifecycle {
+    ignore_changes = [ami]
+  }
 }
 
 resource "aws_instance" "app_b" {
@@ -105,5 +109,9 @@ resource "aws_instance" "app_b" {
 
   tags = {
     Name = "depi-sec-app-b"
+  }
+
+  lifecycle {
+    ignore_changes = [ami]
   }
 }
