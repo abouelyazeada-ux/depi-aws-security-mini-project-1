@@ -108,6 +108,8 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "logs_bucket_sse" 
   }
 }
 
+data "aws_caller_identity" "current" {}
+
 resource "aws_s3_bucket_policy" "logs_bucket_policy" {
   bucket = aws_s3_bucket.logs_bucket.id
   policy = jsonencode({
@@ -125,6 +127,48 @@ resource "aws_s3_bucket_policy" "logs_bucket_policy" {
         Condition = {
           Bool = {
             "aws:SecureTransport" = "false"
+          }
+        }
+      },
+      {
+        Sid    = "AWSLogDeliveryAclCheck"
+        Effect = "Allow"
+        Principal = {
+          Service = "delivery.logs.amazonaws.com"
+        }
+        Action = [
+          "s3:GetBucketAcl",
+          "s3:ListBucket"
+        ]
+        Resource = aws_s3_bucket.logs_bucket.arn
+        Condition = {
+          StringEquals = {
+            "aws:SourceAccount" = data.aws_caller_identity.current.account_id
+          }
+          ArnLike = {
+            "aws:SourceArn" = "arn:aws:logs:us-east-1:${data.aws_caller_identity.current.account_id}:*"
+          }
+        }
+      },
+      {
+        Sid    = "AWSLogDeliveryWrite"
+        Effect = "Allow"
+        Principal = {
+          Service = "delivery.logs.amazonaws.com"
+        }
+        Action = [
+          "s3:PutObject"
+        ]
+        Resource = [
+          "${aws_s3_bucket.logs_bucket.arn}/AWSLogs/${data.aws_caller_identity.current.account_id}/*"
+        ]
+        Condition = {
+          StringEquals = {
+            "s3:x-amz-acl"      = "bucket-owner-full-control"
+            "aws:SourceAccount" = data.aws_caller_identity.current.account_id
+          }
+          ArnLike = {
+            "aws:SourceArn" = "arn:aws:logs:us-east-1:${data.aws_caller_identity.current.account_id}:*"
           }
         }
       }

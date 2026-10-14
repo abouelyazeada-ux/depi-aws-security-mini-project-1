@@ -22,3 +22,8 @@ output "db_secret_arn" {
   description = "ARN of the Secrets Manager secret storing database credentials"
   value       = aws_secretsmanager_secret.db_credentials.arn
 }
+
+output "cloudfront_domain_name" {
+  description = "Domain name of the CloudFront distribution"
+  value       = aws_cloudfront_distribution.cf.domain_name
+}
