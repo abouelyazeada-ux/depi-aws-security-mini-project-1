@@ -17,7 +17,7 @@ Each test case details the operational procedure performed, the expected securit
 | **5** | TCP connection to RDS from internal EC2 instance | Amazon RDS MySQL (`depi-sec-db`) | Port 3306 reachable | Bash `/dev/tcp` probe confirmed: `SUCCESS: RDS port 3306 is reachable` | **PASS (Network Reachability)** | [`11-rds-internal-connection.png`](../screenshots/11-rds/11-rds-internal-connection.png) |
 | **6** | Anonymous / public access to S3 test object | Amazon S3 (`depi-sec-app-*`) | Access denied / refused | Unauthenticated `curl -I` returned `HTTP/1.1 403 Forbidden`; explicit ACL mutation **not executed** | **PASS (Anonymous Read Refusal) / PARTIAL** | [`10-s3-public-access-refused.png`](../screenshots/10-s3/10-s3-public-access-refused.png)<br>[`10-app-bucket-public-access-block.png`](../screenshots/10-s3/10-app-bucket-public-access-block.png) |
 | **7** | Add SSH rule (`0.0.0.0/0:22`) to App SG | Security Auto-Remediation | Removed by Lambda in <60s | *Pending Task 17 Lambda deployment* | **PENDING** | *Awaiting Task 17* |
-| **8** | Stop Nginx web service on one instance | ALB Target Group (`depi-sec-tg`) | Target marked Unhealthy; traffic routes to healthy target | `app-a` marked Unhealthy in console; traffic served by `app-b`; returned to Healthy | **PASS** | [`12-alb-unhealthy-target.png`](../screenshots/12-alb/12-alb-unhealthy-target.png)<br>[`12-alb-failover-working.png`](../screenshots/12-alb/12-alb-failover-working.png)<br>[`12-alb-recovered.png`](../screenshots/12-alb/12-alb-recovered.png) |
+| **8** | Stop Nginx web service on one instance | ALB Target Group (`depi-sec-tg`) & CloudWatch Alarms | Target marked Unhealthy; traffic routes to healthy target; CloudWatch alarm fires; alert email sent | `app-a` marked Unhealthy in console; traffic served by `app-b`; CloudWatch alarm `depi-sec-alb-unhealthy-hosts` transitioned to `ALARM`; real SNS alert email received; `depi-sec-overview` dashboard captured spike to 1 and recovery to 0; returned to Healthy | **PASS** | [`12-alb-unhealthy-target.png`](../screenshots/12-alb/12-alb-unhealthy-target.png)<br>[`12-alb-failover-working.png`](../screenshots/12-alb/12-alb-failover-working.png)<br>[`12-alb-recovered.png`](../screenshots/12-alb/12-alb-recovered.png)<br>[`16-alarm-unhealthy-hosts.png`](../screenshots/16-cloudwatch/16-alarm-unhealthy-hosts.png)<br>[`16-alarm-email-notification.png`](../screenshots/16-cloudwatch/16-alarm-email-notification.png)<br>[`16-dashboard-overview.png`](../screenshots/16-cloudwatch/16-dashboard-overview.png) |
 | **9** | Curl app server from peering tools VPC | VPC Peering Connection | HTTP 200 via private route | *Pending Task 18 Peering deployment* | **PENDING** | *Awaiting Task 18* |
 | **10** | Delete recovery point in locked backup vault | AWS Backup Vault Lock | Access Denied by Vault Lock | *Pending Task 19 Backup deployment* | **PENDING** | *Awaiting Task 19* |
 
@@ -164,29 +164,45 @@ Each test case details the operational procedure performed, the expected securit
 
 ---
 
-### Test 8: Target Group Health Check & Automatic Failover
-- **Objective:** Verify that the Application Load Balancer detects when an application instance becomes unhealthy and routes requests to the healthy instance.
+### Test 8: Target Group Health Check, Automatic Failover & CloudWatch Alarm Verification
+- **Objective:** Verify that the Application Load Balancer detects when an application instance becomes unhealthy, routes requests to the healthy instance, triggers CloudWatch Alarm `depi-sec-alb-unhealthy-hosts`, dispatches an automated SNS email notification, visualizes the failure on the `depi-sec-overview` operational dashboard, and recovers gracefully upon service restoration.
 - **Empirical Evidence & Observed Procedure:**
-  1. Inspected Target Group `depi-sec-tg` in the AWS Management Console:
-     - `depi-sec-app-b` (`i-0306fb121beae9963` / `us-east-1b`): `Healthy`
-     - `depi-sec-app-a` (`i-0749711e008057ae1` / `us-east-1a`): `Unhealthy` (`Health checks failed`)
-  2. Accessed the web application through the ALB URL in a browser while `app-a` was unhealthy.
-  3. Inspected Target Group `depi-sec-tg` after service recovery.
-- **Expected Outcome:** Traffic is directed to the healthy target while the unhealthy target is bypassed; targets recover to Healthy when operational.
+  1. Connected to `depi-sec-app-a` (`i-0749711e008057ae1`) out-of-band via AWS Systems Manager Session Manager and stopped the web service:
+     ```bash
+     sudo systemctl stop nginx
+     ```
+  2. The ALB target health check detected consecutive health check failures and marked `depi-sec-app-a` as `Unhealthy` (`Health checks failed`) within ~90 seconds. Target `depi-sec-app-b` remained `Healthy`.
+  3. Accessed the web application via CloudFront and ALB; verified that all incoming client requests seamlessly routed to `depi-sec-app-b` (`AZ: us-east-1b`) with zero user-facing service outage.
+  4. CloudWatch metric `UnHealthyHostCount` rose from 0 to 1 on `depi-sec-tg` / `depi-sec-alb`.
+  5. CloudWatch Alarm `depi-sec-alb-unhealthy-hosts` evaluated the breach (`Threshold Crossed: 1 datapoint [1.0 (15/10/26 23:01:00)] was greater than the threshold (0.0)`) and transitioned from `OK` to `ALARM` state at `2026-10-15 23:04:55 UTC`.
+  6. Amazon SNS (`depi-sec-alerts`) published an automated notification email to subscriber `abouelyazeada@gmail.com`, detailing the alarm name, description, reason, timestamp, and affected resource ARNs.
+  7. The CloudWatch operational dashboard `depi-sec-overview` reflected the incident in real-time on the `ALB Target Group UnHealthy Hosts` widget, showing the metric count rising from 0 to 1 against the threshold line.
+  8. Restored the Nginx service on `depi-sec-app-a`:
+     ```bash
+     sudo systemctl start nginx
+     ```
+  9. The target group health checks returned `depi-sec-app-a` to `Healthy` status.
+  10. Metric `UnHealthyHostCount` dropped back to 0, the alarm transitioned from `ALARM` back to `OK`, and the `depi-sec-overview` dashboard captured the complete failure-to-recovery curve.
+  11. *Testing Boundary & Active Alarm Scope:* Alarms 1 (`depi-sec-ec2-cpu-high-app-a` and `app-b`), 3 (`depi-sec-rds-free-storage-low`), and 4 (`depi-sec-failed-console-logins-alarm`) were deployed with verified configurations and active `OK` state. In accordance with Task 16 specifications, only Alarm 2 (ALB Unhealthy Hosts) was actively triggered to validate the end-to-end alerting pipeline without generating synthetic CPU stress, filling database storage, or causing authentication lockouts.
+- **Expected Outcome:** Unhealthy target bypassed, CloudWatch Alarm fires and sends SNS email notification, dashboard shows live metric anomaly, and target returns to Healthy upon restart.
 - **Actual Result:**
-  - The AWS Console confirmed `depi-sec-tg` registered 1 Healthy target (`app-b`) and 1 Unhealthy target (`app-a`).
-  - Web requests routed to `depi-sec-app-b` (`AZ: us-east-1b`).
-  - Upon service recovery, Target Group console confirmed both targets returned to `Healthy` status.
-  - *Note on Scope:* Exact failover timestamps or packet drop measurements were not recorded and are not claimed.
+  - ALB target group marked `app-a` Unhealthy while `app-b` served traffic.
+  - Alarm `depi-sec-alb-unhealthy-hosts` entered `In alarm` state.
+  - Real SNS alert email successfully delivered to `abouelyazeada@gmail.com`.
+  - Operations dashboard `depi-sec-overview` displayed live telemetry spike to 1 and recovery to 0.
+  - Both targets returned to Healthy upon service restart.
 - **Status:** **PASS**
 - **Screenshots:**
   - [`12-alb-unhealthy-target.png`](../screenshots/12-alb/12-alb-unhealthy-target.png) — Target Group console showing `app-a` marked `Unhealthy` and `app-b` marked `Healthy`.
   - [`12-alb-failover-working.png`](../screenshots/12-alb/12-alb-failover-working.png) — Browser displaying active response from `depi-sec-app-b`.
   - [`12-alb-recovered.png`](../screenshots/12-alb/12-alb-recovered.png) — Target Group console showing both targets in `Healthy` status.
+  - [`16-alarm-unhealthy-hosts.png`](../screenshots/16-cloudwatch/16-alarm-unhealthy-hosts.png) — CloudWatch Alarms console showing `depi-sec-alb-unhealthy-hosts` in `In alarm` state and remaining alarms in `OK` state.
+  - [`16-alarm-email-notification.png`](../screenshots/16-cloudwatch/16-alarm-email-notification.png) — Real email notification received via Amazon SNS `depi-sec-alerts`.
+  - [`16-dashboard-overview.png`](../screenshots/16-cloudwatch/16-dashboard-overview.png) — Operational dashboard `depi-sec-overview` displaying all 4 widgets and the ALB unhealthy host count spike and recovery.
 
 ---
 
-## Pending Security Test Cases (Tasks 16–20)
+## Pending Security Test Cases (Tasks 17–20)
 
 The remaining test cases from Task 20 require components scheduled for subsequent project tasks:
 

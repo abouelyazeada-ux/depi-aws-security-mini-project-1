@@ -5,7 +5,7 @@ This project delivers an enterprise-grade, defense-in-depth web infrastructure o
 The architecture enforces strict network isolation across two Availability Zones, hosting compute and database workloads in private subnets with zero public IP addresses.
 Public user traffic is accelerated and secured at the perimeter via an AWS CloudFront distribution configured with HTTPS viewer access and custom origin header verification.
 In-depth security controls include tiered security group chaining, stateless Network ACLs, AWS Systems Manager keyless administration, and S3 Block Public Access.
-Centralized governance incorporates automated AWS Budgets cost alerts, Secrets Manager credential management, multi-region AWS CloudTrail auditing, and CloudWatch Standard Logging v2 alongside VPC Flow Logs network traffic capture.
+Centralized governance incorporates automated AWS Budgets cost alerts, Secrets Manager credential management, multi-region AWS CloudTrail auditing, and CloudWatch Standard Logging v2 alongside VPC Flow Logs network traffic capture, proactive CloudWatch metric alarms, and a unified operations dashboard backed by Amazon SNS email alerts.
 
 ---
 
@@ -86,7 +86,7 @@ flowchart TB
 ### Architecture Description
 The architecture separates public ingress from backend processing and storage across two Availability Zones (`us-east-1a` and `us-east-1b`). Clients access the web application through **AWS CloudFront** over HTTPS, which injects a cryptographic custom header (`X-Origin-Verify`). The **Application Load Balancer (ALB)** in the public subnets checks for this header; direct access to the ALB without the header is blocked with a `403 Forbidden`.
 
-The application tier runs on private Amazon Linux 2023 EC2 instances (`depi-sec-app-a` and `depi-sec-app-b`) with **no public IPs**. Compute instances mount an encrypted **Amazon EFS** shared file system and query a private **Amazon RDS MySQL 8.0** instance. Direct management is handled out-of-band via **AWS Systems Manager Session Manager** through dedicated VPC Interface Endpoints, while S3 storage requests utilize a private **VPC Gateway Endpoint**, ensuring zero exposure to the public internet. Comprehensive auditing is provided by multi-region **AWS CloudTrail** (auditing management actions and S3 data events into a centralized log bucket and CloudWatch Logs) and VPC-level **VPC Flow Logs** (`depi-sec-vpc-flow-log`), which captures all network IP traffic across every ENI and publishes to Amazon CloudWatch Logs.
+The application tier runs on private Amazon Linux 2023 EC2 instances (`depi-sec-app-a` and `depi-sec-app-b`) with **no public IPs**. Compute instances mount an encrypted **Amazon EFS** shared file system and query a private **Amazon RDS MySQL 8.0** instance. Direct management is handled out-of-band via **AWS Systems Manager Session Manager** through dedicated VPC Interface Endpoints, while S3 storage requests utilize a private **VPC Gateway Endpoint**, ensuring zero exposure to the public internet. Comprehensive auditing and observability are provided by multi-region **AWS CloudTrail** (auditing management actions and S3 data events into a centralized log bucket and CloudWatch Logs), VPC-level **VPC Flow Logs** (`depi-sec-vpc-flow-log`) capturing network IP traffic across every ENI, and proactive **Amazon CloudWatch Alarms** chained to **Amazon SNS** (`depi-sec-alerts`) with a consolidated operational dashboard (**depi-sec-overview**).
 
 ---
 
@@ -123,6 +123,7 @@ The application tier runs on private Amazon Linux 2023 EC2 instances (`depi-sec-
 | **SEC-13** | CloudFront HTTPS & Origin Verification | AWS CloudFront / ALB | Cleartext eavesdropping; browser HTTPS access verified; direct ALB access returns 403 Forbidden | [13-cloudfront-alb-denied.png](screenshots/13-cloudfront/13-cloudfront-alb-denied.png) | **Verified** |
 | **SEC-14** | Multi-Region Audit Logging (CloudTrail) | AWS CloudTrail | Undetected API modifications, administrative credential misuse, unauthorized security group or IAM changes | [14-cloudtrail-settings.png](screenshots/14-cloudtrail/14-cloudtrail-settings.png) | **Verified** |
 | **SEC-15** | VPC Flow Logs Network Traffic Auditing | Amazon VPC / CloudWatch Logs | Undetected lateral network movement, unauthorized port scanning, data exfiltration, covert channel communication | [15-flowlog-reject-record.png](screenshots/15-flowlogs/15-flowlog-reject-record.png) | **Verified** |
+| **SEC-16** | CloudWatch Metric Alarms & Dashboard | Amazon CloudWatch / SNS | Delayed incident awareness for failing targets, resource starvation, or brute-force console login attempts | [16-dashboard-overview.png](screenshots/16-cloudwatch/16-dashboard-overview.png) | **Verified** |
 
 > Comprehensive threat model analyses and controls descriptions are available in [docs/security-controls.md](docs/security-controls.md).
 
@@ -199,7 +200,7 @@ Terraform will display the provisioned endpoints upon successful completion:
 
 ## 7. How to verify
 
-Verification follows the standardized 10-test protocol defined in Task 20. Completed tests (Tasks 1–15) have been empirically verified and are documented below strictly based on observed evidence. Pending tests requiring Tasks 16–20 are designated accordingly.
+Verification follows the standardized 10-test protocol defined in Task 20. Completed tests (Tasks 1–16) have been empirically verified and are documented below strictly based on observed evidence. Pending tests requiring Tasks 17–20 are designated accordingly.
 
 | # | Test Action | Expected Result | Verified Result | Status | Screenshot Link |
 | :-: | :--- | :--- | :--- | :-: | :--- |
@@ -210,7 +211,7 @@ Verification follows the standardized 10-test protocol defined in Task 20. Compl
 | **5** | Connect to RDS from app server via SSM | Port 3306 reachable | Bash `/dev/tcp` probe confirmed: `SUCCESS: RDS port 3306 is reachable` *(MySQL auth/queries not tested)* | **PASS (Network Reachability)** | [11-rds-internal-connection.png](screenshots/11-rds/11-rds-internal-connection.png) |
 | **6** | Make S3 object public in bucket | Rejected by Block Public Access | Unauthenticated `curl.exe -I` returned `HTTP/1.1 403 Forbidden`; explicit public ACL mutation **not executed** | **PASS (Anonymous Read Refusal) / PARTIAL** | [10-s3-public-access-refused.png](screenshots/10-s3/10-s3-public-access-refused.png) |
 | **7** | Add SSH rule to App SG (Auto-remediation) | Removed by Lambda in <60s | *Pending Task 17 implementation* | **PENDING** | *Awaiting Task 17* |
-| **8** | Stop Nginx on one application instance | ALB marks Unhealthy; site up | Target group registered `app-a` Unhealthy; traffic served by `app-b`; recovered to Healthy | **PASS** | [12-alb-unhealthy-target.png](screenshots/12-alb/12-alb-unhealthy-target.png) |
+| **8** | Stop Nginx on one application instance | ALB marks Unhealthy; site up; alarm fires | Target group registered `app-a` Unhealthy; traffic served by `app-b`; CloudWatch alarm `depi-sec-alb-unhealthy-hosts` transitioned to `ALARM`; real SNS alert email received; `depi-sec-overview` dashboard captured spike to 1 and recovery to 0; recovered to Healthy | **PASS** | [12-alb-unhealthy-target.png](screenshots/12-alb/12-alb-unhealthy-target.png)<br>[16-alarm-unhealthy-hosts.png](screenshots/16-cloudwatch/16-alarm-unhealthy-hosts.png)<br>[16-alarm-email-notification.png](screenshots/16-cloudwatch/16-alarm-email-notification.png) |
 | **9** | Curl app server from peering tools VPC | HTTP 200 across peering link | *Pending Task 18 implementation* | **PENDING** | *Awaiting Task 18* |
 | **10** | Delete recovery point in locked vault | Blocked by Vault Lock policy | *Pending Task 19 implementation* | **PENDING** | *Awaiting Task 19* |
 
@@ -369,6 +370,14 @@ AWS VPC Flow Logs capture network IP traffic metadata using 14 standard space-de
 | **13** | `action` | The security decision applied to the traffic: `ACCEPT` (permitted by both SG and NACL) or `REJECT` (blocked by SG or NACL). | `REJECT` |
 | **14** | `log-status` | The operational status of the logging service: `OK` (logged normally), `NODATA` (no traffic during interval), or `SKIPDATA` (records skipped due to internal capacity constraints). | `OK` |
 
+### Task 16 — CloudWatch Alarms & Operations Dashboard
+- **Operations Dashboard (`depi-sec-overview`):** Demonstrates the real-time CloudWatch operational dashboard tracking all four key metrics: EC2 CPU utilization across both application servers, ALB unhealthy host count (capturing the test spike to 1 and recovery to 0), RDS MySQL available storage space, and CloudTrail failed console logins.<br>
+  ![Dashboard Overview](screenshots/16-cloudwatch/16-dashboard-overview.png)
+- **ALB Unhealthy Target Alarm Triggered:** Demonstrates CloudWatch Alarm `depi-sec-alb-unhealthy-hosts` entering `In alarm` state when Nginx was stopped on `depi-sec-app-a`, showing active monitoring and evaluation.<br>
+  ![Alarm State](screenshots/16-cloudwatch/16-alarm-unhealthy-hosts.png)
+- **Real SNS Alert Email Delivery:** Shows the actual email notification received from Amazon SNS (`depi-sec-alerts`) delivering the alarm payload with state transition (`OK -> ALARM`), affected resource ARNs, and threshold details.<br>
+  ![Alarm Email Notification](screenshots/16-cloudwatch/16-alarm-email-notification.png)
+
 ---
 
 ## 9. Cost notes
@@ -389,6 +398,8 @@ Building secure cloud platforms requires understanding which services incur hour
 | **Amazon EFS** | 5 GB free storage per month | $0.00 / month | Lightweight access point with TLS encryption |
 | **AWS CloudTrail** | Free tier for 1st management copy | ~$0.00 / month | Multi-region trail with S3 read data events scoped to app bucket |
 | **Amazon CloudWatch Logs (VPC Flow Logs)** | $0.50/GB ingested + $0.03/GB/mo storage | ~$0.25 / month | Aggregates VPC-level network traffic with 14-day retention |
+| **Amazon CloudWatch (Alarms & Dashboard)** | $0.10/alarm/month + free dashboard tier | ~$0.50 / month | 5 standard-resolution alarms with dashboard utilizing free tier allocation |
+| **Amazon Simple Notification Service (SNS)** | Free tier for 1st 1,000 email alerts | $0.00 / month | Scoped email subscription for administrator alerts without KMS CMK costs |
 
 ### Cost Guardrail Safeguards & Budget Boundaries
 - An active monthly budget (`depi-sec-monthly`) of **$10.00 USD** is enforced.
@@ -448,12 +459,13 @@ Open the AWS Management Console in `us-east-1` and verify that the following das
 10. **Negative testing is as critical as positive functional testing.** Validating that unauthorized actions fail (e.g., verifying 403 Forbidden on direct ALB access, TCP connection failures on RDS from external networks, and refused public S3 reads) provides empirical proof that security controls are genuinely active without assuming unexecuted application layers.
 11. **Comprehensive network visibility requires passive flow auditing at the VPC root boundary.** Provisioning VPC Flow Logs at the VPC level provides unified visibility into every Elastic Network Interface without requiring in-guest agents and operating independently of guest operating system and application workloads. Analyzing the 14 default fields enables engineers to distinguish normal traffic (`ACCEPT`) from scanning activity or unauthorized lateral movement (`REJECT`) across both public and private subnets.
 12. **Audit trails require multi-layered log shipping to prevent tampering.** Streaming CloudTrail management and data events simultaneously to encrypted Amazon S3 (for long-term tamper-evident archival with log file validation) and Amazon CloudWatch Logs (for real-time metric filtering and rapid querying via CloudWatch Logs Insights) combines immutability with incident response agility.
+13. **Proactive observability and alerting must separate infrastructure metrics from security signals.** While operational alarms (ALB target health, EC2 CPU, RDS storage) track resource availability and performance, security alarms (CloudTrail metric filters for failed console authentication) deliver automated incident awareness. Chaining CloudWatch alarms to Amazon SNS with least-privilege topic policies enables rapid, automated operator notification without introducing fragile third-party dependencies or KMS key overhead.
 
 ---
 
 ## 12. Known limitations
 
-While the platform implements rigorous security controls for completed Tasks 1–15, several known architectural limitations exist that should be addressed in a production deployment:
+While the platform implements rigorous security controls for completed Tasks 1–16, several known architectural limitations exist that should be addressed in a production deployment:
 
 1. **Unencrypted HTTP Between CloudFront and Application Load Balancer:**
    - *Limitation:* The CloudFront origin protocol policy is set to `http-only` on port 80 as mandated by the educational project scope.
@@ -472,5 +484,5 @@ While the platform implements rigorous security controls for completed Tasks 1�
 5. **Cost Monitoring vs Hard Spending Limits:**
    - *Limitation:* AWS Budgets provides alerts and automated IAM deny policies for new resources, but AWS does not natively enforce hard billing caps that automatically terminate running infrastructure.
    - *Production Solution:* Deploy automated EventBridge and Lambda functions to shut down or delete test resources if budget thresholds are breached.
-6. **Outstanding Project Tasks (Tasks 16–20):**
-   - Security metric alarms and operations dashboard (Task 16), automated Lambda security remediation (Task 17), VPC Peering for administrative isolation (Task 18), immutable AWS Backup vault locking (Task 19), and final teardown/cost validation (Task 20) remain to be completed in subsequent implementation phases. Tasks 1–15 are fully deployed, verified, and documented.
+6. **Outstanding Project Tasks (Tasks 17–20):**
+   - Automated Lambda security remediation (Task 17), VPC Peering for administrative isolation (Task 18), immutable AWS Backup vault locking (Task 19), and final teardown/cost validation (Task 20) remain to be completed in subsequent implementation phases. Tasks 1–16 are fully deployed, verified, and documented.

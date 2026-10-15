@@ -251,6 +251,26 @@ The `depi-sec-private-nacl` is explicitly associated with private subnets (`depi
    - A CloudWatch Logs Insights query explicitly scoped to `/depi-sec/vpc/flowlogs` filtering on `dstport = "22"` and `action = "REJECT"` isolated four distinct dropped connection attempts. These include an internal lateral probe from `depi-sec-app-a` (`10.0.11.161`) to `depi-sec-app-b` (`10.0.12.241`) on destination TCP port 22 that timed out with exit code 124, alongside external reconnaissance hitting public ALB interfaces (`10.0.2.49`, `10.0.1.109`).
    - *Security Enforcement Boundary & Attribution:* This empirical verification confirms Layer 4 TCP network isolation and is distinct from an interactive SSH authentication test, which was not executed. While the Flow Log confirms that unauthorized port 22 traffic is rejected at the network interface layer, flow log records do not differentiate whether the drop was enforced by the stateless Network ACL (`depi-sec-private-nacl` Rule 200) or by the stateful Security Group (`depi-sec-app-sg`), as both firewalls strictly deny inbound port 22.
 
+### 7.6. Platform Observability, Security Alarms & SNS Alerting (Task 16)
+1. **Architectural Scope & Placement:** Implemented in `terraform/monitoring.tf`, centralized observability unifies infrastructure telemetry and security event detection into automated alerting workflows and an operations dashboard:
+   - **Unified Operational Dashboard (`depi-sec-overview`):** Provides a single-pane-of-glass visual interface containing four dedicated widgets with threshold annotations: (1) EC2 CPU utilization across both application servers, (2) ALB unhealthy target host counts, (3) RDS database free storage space, and (4) CloudTrail failed console login events.
+   - **Proactive Metric Alarms:** Five CloudWatch metric alarms continuously evaluate platform health across compute, networking, database, and governance tiers.
+2. **Metric Alarm Telemetry & Thresholds:**
+   - **EC2 Compute Load Alarms:** Alarms `depi-sec-ec2-cpu-high-app-a` and `depi-sec-ec2-cpu-high-app-b` independently monitor instances `i-0749711e008057ae1` and `i-0306fb121beae9963` for `CPUUtilization > 70%` across two consecutive 5-minute periods (`evaluation_periods = 2`, `datapoints_to_alarm = 2`, `treat_missing_data = "notBreaching"`).
+   - **ALB Target Group Health Alarm:** Alarm `depi-sec-alb-unhealthy-hosts` monitors `AWS/ApplicationELB` `UnHealthyHostCount` across dimensions `TargetGroup` (`depi-sec-tg`) and `LoadBalancer` (`depi-sec-alb`). Configured with period `60s` and threshold `> 0`, it triggers immediately if either target fails health checks and emits recovery notifications when the target restores.
+   - **RDS Database Capacity Alarm:** Alarm `depi-sec-rds-free-storage-low` monitors `AWS/RDS` `FreeStorageSpace` on `depi-sec-db` for drops below 2 GB (`2,147,483,648` Bytes) over a 300s evaluation window.
+   - **Security Failed Console Login Alarm:** Alarm `depi-sec-failed-console-logins-alarm` evaluates security events extracted from CloudTrail, firing if 3 or more authentication failures occur within 5 minutes (`threshold = 3`, `period = 300`, `statistic = "Sum"`).
+3. **CloudTrail Security Metric Filtering:**
+   - Attached to log group `/aws/cloudtrail/depi-sec-trail`, metric filter `depi-sec-failed-console-logins-filter` inspects incoming JSON audit events using pattern:
+     ```text
+     { ($.eventName = "ConsoleLogin") && ($.errorMessage = "Failed authentication") }
+     ```
+   - Matches are mapped to metric `FailedConsoleLogins` in namespace `depi-sec/Security` with value `1` and default `0`, converting unstructured governance logs into actionable metric telemetry.
+4. **Decoupled Notification Pipeline & IAM Topic Security:**
+   - **SNS Alert Topic (`depi-sec-alerts`):** Aggregates alarm triggers and dispatches email notifications to the confirmed administrator endpoint (`var.alert_email`).
+   - **Least-Privilege Topic Access Policy:** Topic policy `depi-sec-alerts-policy` explicitly allows the owning AWS account root (`arn:aws:iam::<account-id>:root`) full topic management rights, while restricting publishing rights strictly to service principal `cloudwatch.amazonaws.com` conditioned on `aws:SourceAccount`. Cross-account and public access are completely prohibited.
+   - **Encryption Architecture Decision:** The SNS topic is intentionally configured without AWS-managed KMS encryption. CloudWatch Alarms is incompatible with the default AWS-managed KMS key (`alias/aws/sns`) because its key policy cannot be modified to grant decrypt/generate data key permissions to `cloudwatch.amazonaws.com`. Maintaining an unencrypted topic prevents delivery failure and avoids recurring Customer Managed Key (CMK) monthly charges ($1.00/month).
+
 ---
 
 ## 8. Architectural Limitations & Security Boundary Analysis
@@ -285,3 +305,5 @@ As required by the project specifications, the architecture incorporates educati
 | **RDS MySQL** | Private Subnets (DB Subnet Group) | Database engines must never reside in public subnets. Restricting access to internal application security groups eliminates direct internet brute force or exploit exposure. |
 | **VPC Endpoints** | Private Subnets / Route Tables | Keeps management (SSM) and object storage (S3) traffic entirely on AWS private infrastructure, saving NAT Gateway data processing costs and eliminating public egress routes. |
 | **VPC Flow Logs** | VPC Root (`vpc-0f7551daf8a303b6b`) | Out-of-band, hypervisor-level monitoring across all ENIs in all subnets, capturing network traffic metadata into CloudWatch Logs independently of guest instances without consuming host instance compute resources. |
+| **CloudWatch Alarms & Dashboard** | Regional (`us-east-1`) | Aggregates operational and security telemetry across EC2, ALB, RDS, and CloudTrail log streams, providing proactive incident notification and consolidated visual dashboard monitoring. |
+| **SNS Alert Topic (`depi-sec-alerts`)** | Regional (`us-east-1`) | Decoupled serverless notification service delivering real-time administrator alerts for infrastructure failures and security anomalies with strict least-privilege IAM policies. |

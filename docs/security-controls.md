@@ -25,6 +25,7 @@ Unimplemented controls scheduled for **Tasks 16–20** are clearly designated as
 | **SEC-13** | **Edge Protection, HTTPS Enforcement & Origin Header Gating** | AWS CloudFront & ALB | Eavesdropping on viewer connections; bypass of CloudFront caching and rate-limiting policies. | CloudFront distribution configured with `redirect-to-https` viewer protocol policy. Injects a 32-character secret `X-Origin-Verify` header. ALB listener default action returns `403 Forbidden` for direct requests; forward action triggers only when header matches. Browser HTTPS access verified; access logs delivered via CloudFront Standard Logging v2. | [`13-cloudfront-https-working.png`](../screenshots/13-cloudfront/13-cloudfront-https-working.png)<br>[`13-cloudfront-alb-denied.png`](../screenshots/13-cloudfront/13-cloudfront-alb-denied.png)<br>[`13-cloudfront-403-status.png`](../screenshots/13-cloudfront/13-cloudfront-403-status.png)<br>[`13-cloudfront-logging.png`](../screenshots/13-cloudfront/13-cloudfront-logging.png) | **Verified** |
 | **SEC-14** | **Centralized Management Audit Logging** | AWS CloudTrail | Undetected API modifications, administrative credential misuse, unauthorized security group or IAM changes. | Multi-region trail `depi-sec-trail` with log file validation, management events (Read/Write: All), and S3 read data events for `depi-sec-app-*`. Delivers logs to central S3 logs bucket (`depi-sec-logs-*`) and CloudWatch Log Group `/aws/cloudtrail/depi-sec-trail` (14-day retention) via IAM role `depi-sec-cloudtrail-cw-role`. S3 bucket policy enforces `aws:SourceArn` restriction and `bucket-owner-full-control`. | [`14-cloudtrail-settings.png`](../screenshots/14-cloudtrail/14-cloudtrail-settings.png)<br>[`14-cloudtrail-event-identity.png`](../screenshots/14-cloudtrail/14-cloudtrail-event-identity.png) | **Verified** |
 | **SEC-15** | **VPC Flow Logs & Network Traffic Auditing** | Amazon VPC & CloudWatch Logs | Undetected lateral network movement, unauthorized port scanning, data exfiltration, covert channel communication. | `aws_flow_log.app_vpc_flow_log` (`fl-01baa2f74df906054`) attached to `aws_vpc.app_vpc` (`vpc-0f7551daf8a303b6b`) for `traffic_type = "ALL"`, publishing to `/depi-sec/vpc/flowlogs` (14-day retention) via least-privilege role `depi-sec-vpc-flow-logs-role`. Ingested `ACCEPT` records and 4 `REJECT` records on destination TCP port 22 verified via CloudWatch Logs Insights (including internal source `10.0.11.161` to `10.0.12.241`). | [`15-flowlog-reject-record.png`](../screenshots/15-flowlogs/15-flowlog-reject-record.png) | **Verified** |
+| **SEC-16** | **CloudWatch Alarms, Security Metric Filtering & Proactive Alerting** | Amazon CloudWatch & Amazon SNS | Delayed incident detection for compute CPU exhaustion, target health failure, database storage starvation, and brute-force console login attempts. | 5 CloudWatch metric alarms deployed: (1) `depi-sec-ec2-cpu-high-app-a` (>70%), (2) `depi-sec-ec2-cpu-high-app-b` (>70%), (3) `depi-sec-alb-unhealthy-hosts` (>0), (4) `depi-sec-rds-free-storage-low` (<2 GB), (5) `depi-sec-failed-console-logins-alarm` (>=3 in 5m via CloudTrail metric filter `{ ($.eventName = "ConsoleLogin") && ($.errorMessage = "Failed authentication") }`). Alerts delivered to `depi-sec-alerts` SNS topic. ALB alarm transition (`OK -> ALARM`), real email alert delivery, and recovery (`ALARM -> OK`) verified during Nginx test. Operational dashboard `depi-sec-overview` visualizes live metrics. | [`16-dashboard-overview.png`](../screenshots/16-cloudwatch/16-dashboard-overview.png)<br>[`16-alarm-unhealthy-hosts.png`](../screenshots/16-cloudwatch/16-alarm-unhealthy-hosts.png)<br>[`16-alarm-email-notification.png`](../screenshots/16-cloudwatch/16-alarm-email-notification.png) | **Verified** |
 
 ---
 
@@ -87,14 +88,51 @@ VPC Flow Logs record the packet evaluation decision (`REJECT`) at the network in
 
 ---
 
-## 4. Pending Security Controls (Tasks 16–20)
+## 4. In-Depth Analysis: CloudWatch Observability, Metric Filtering & SNS Alerting (Task 16)
+
+As part of Task 16, proactive monitoring and real-time operational observability are established across compute, load balancing, relational database, and governance tiers.
+
+### 4.1. Proactive Metric Alarms & Telemetry Structure
+Five CloudWatch metric alarms continuously evaluate infrastructure health and security posture:
+- **Compute Load Alarms:** `depi-sec-ec2-cpu-high-app-a` and `depi-sec-ec2-cpu-high-app-b` independently evaluate instances `i-0749711e008057ae1` and `i-0306fb121beae9963` for `CPUUtilization > 70%` over 2 consecutive 5-minute periods (`evaluation_periods = 2`, `datapoints_to_alarm = 2`, `statistic = "Average"`, `treat_missing_data = "notBreaching"`).
+- **ALB Target Group Health Alarm:** `depi-sec-alb-unhealthy-hosts` evaluates `UnHealthyHostCount > 0` over 60 seconds across dimensions `TargetGroup` (`depi-sec-tg`) and `LoadBalancer` (`depi-sec-alb`). Dispatches alert notifications upon breach and recovery notifications (`ok_actions`) upon target restoration.
+- **RDS Database Capacity Alarm:** `depi-sec-rds-free-storage-low` evaluates `FreeStorageSpace < 2147483648` Bytes (2 GB) on `depi-sec-db` over 300 seconds (`statistic = "Average"`).
+- **Security Failed Console Login Alarm:** `depi-sec-failed-console-logins-alarm` evaluates security events extracted from CloudTrail, firing if 3 or more authentication failures occur within 5 minutes (`threshold = 3`, `period = 300`, `statistic = "Sum"`).
+
+### 4.2. Security Metric Filtering on CloudTrail Audit Logs
+Attached to `/aws/cloudtrail/depi-sec-trail`, metric filter `depi-sec-failed-console-logins-filter` parses management event JSON payloads using exact pattern:
+```text
+{ ($.eventName = "ConsoleLogin") && ($.errorMessage = "Failed authentication") }
+```
+Matches are published to metric `FailedConsoleLogins` under namespace `depi-sec/Security` with value `1` and default `0`, enabling automated alarm triggering on potential brute-force or unauthorized credential stuffing attacks.
+
+### 4.3. SNS Topic Policy & Least-Privilege Access Control
+Alert topic `depi-sec-alerts` attaches policy `depi-sec-alerts-policy`:
+- **Owning Account Administration:** Statement `AllowAccountOwnerManageTopic` grants `arn:aws:iam::<account-id>:root` topic management actions (`sns:GetTopicAttributes`, `sns:SetTopicAttributes`, `sns:AddPermission`, `sns:RemovePermission`, `sns:DeleteTopic`, `sns:Subscribe`, `sns:ListSubscriptionsByTopic`, `sns:Publish`).
+- **CloudWatch Service Delegation:** Statement `AllowCloudWatchAlarmsPublish` restricts `sns:Publish` strictly to service principal `cloudwatch.amazonaws.com` conditioned on `StringEquals: { "aws:SourceAccount": "<account-id>" }`. Public (`*`) and cross-account access are strictly prohibited.
+
+### 4.4. SNS Encryption Architecture Decision
+The SNS topic is intentionally configured without AWS-managed KMS encryption (`alias/aws/sns`):
+- CloudWatch Alarms cannot publish to topics encrypted with default AWS-managed KMS keys because default KMS key policies are immutable and cannot grant `kms:GenerateDataKey*` or `kms:Decrypt` permissions to `cloudwatch.amazonaws.com`.
+- Overcoming this requires provisioning a Customer Managed Key (CMK), incurring a fixed fee of $1.00/month (10% of the project's $10 budget).
+- Maintaining an unencrypted topic at the SNS service level guarantees alarm delivery and avoids recurring CMK charges, with security enforced by least-privilege resource policies and TLS transit encryption.
+
+### 4.5. Operations Dashboard (`depi-sec-overview`)
+The CloudWatch dashboard consolidates real-time telemetry into four widgets:
+1. `EC2 Compute CPU Utilization (%)` with threshold line at 70%.
+2. `ALB Target Group UnHealthy Hosts` with threshold line at > 0.
+3. `RDS Database Free Storage Space` with threshold line at 2 GB (`2,147,483,648` Bytes).
+4. `Security: CloudTrail Failed Console Logins` with threshold line at >= 3.
+
+---
+
+## 5. Pending Security Controls (Tasks 17–20)
 
 The following controls represent outstanding project tasks that have not yet been implemented or deployed in Terraform:
 
 | Task | Control | Planned AWS Service | Planned Threat Mitigation | Current Status |
 | :--- | :--- | :--- | :--- | :--- |
-| **Task 16** | **Security Metric Alarms & Operations Dashboard** | Amazon CloudWatch & SNS | Delayed incident awareness for failing targets or unauthorized root activity. | *Pending implementation in `logging.tf`* |
 | **Task 17** | **Event-Driven Security Auto-Remediation** | AWS Lambda & EventBridge | Rogue security group rule modification opening port 22/3306 to `0.0.0.0/0`. | *Pending implementation in `lambda.tf`* |
 | **Task 18** | **Isolated Management Network (VPC Peering)** | AWS VPC Peering | Direct public access for operations; unsegmented administrative tools. | *Pending implementation in `peering.tf`* |
 | **Task 19** | **Immutable Ransomware-Resistant Backups** | AWS Backup (Vault Lock) | Ransomware deletion of snapshots, accidental administrator destruction of backups. | *Pending implementation in `backup.tf`* |
-| **Task 20** | **End-to-End Security Audit & Clean Destroy** | Terraform CLI & AWS Console | Unmonitored lingering infrastructure, resource leakage, cost overruns. | *Pending final execution after Tasks 16–19* |
+| **Task 20** | **End-to-End Security Audit & Clean Destroy** | Terraform CLI & AWS Console | Unmonitored lingering infrastructure, resource leakage, cost overruns. | *Pending final execution after Tasks 17–19* |
