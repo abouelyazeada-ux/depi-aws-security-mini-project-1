@@ -1,6 +1,6 @@
 # Cloud Infrastructure Architecture — Secure AWS Web Platform
 
-This document provides a comprehensive technical breakdown of the multi-tier, multi-AZ cloud architecture implemented for DEPI Mini Project 1. It details the network topology, routing architecture, component placement rationale, data flows, and security boundaries across **Tasks 1–13**.
+This document provides a comprehensive technical breakdown of the multi-tier, multi-AZ cloud architecture implemented for DEPI Mini Project 1. It details the network topology, routing architecture, component placement rationale, data flows, and security boundaries across **Tasks 1–15**.
 
 ---
 
@@ -15,6 +15,7 @@ The platform is designed around the core security principles of **Defense in Dep
 - **Shared & Encrypted Storage Tier:** Amazon EFS provides a multi-AZ shared file system mounted by both EC2 instances over TLS via an EFS Access Point (`/app-data`, POSIX UID/GID 1000). EC2 root EBS volumes are encrypted using AWS-managed KMS (`gp3`).
 - **Private Database Tier:** Amazon RDS MySQL 8.0 operates inside a private DB subnet group spanning both Availability Zones. It is marked `publicly_accessible = false`, has encrypted storage (`gp3`), and accepts inbound traffic exclusively on TCP port 3306 originating from the application security group.
 - **Private AWS Service Connectivity:** Private subnets reach Amazon S3 through a VPC Gateway Endpoint and AWS Systems Manager through three VPC Interface Endpoints (`ssm`, `ssmmessages`, `ec2messages`), eliminating the requirement for an internet egress route or NAT gateway for server management and data storage.
+- **VPC-Level Network Traffic Auditing:** A VPC Flow Log (`fl-01baa2f74df906054`, status `ACTIVE`, delivery `SUCCESS`) attached to the root of `depi-sec-app-vpc` (`vpc-0f7551daf8a303b6b`) captures IP traffic across all network interfaces (public ALB, private EC2, RDS, EFS, and endpoints) for traffic type `ALL`, publishing to Amazon CloudWatch Logs (`/depi-sec/vpc/flowlogs`) with 14-day retention via dedicated IAM role `depi-sec-vpc-flow-logs-role`.
 
 ---
 
@@ -232,6 +233,24 @@ The `depi-sec-private-nacl` is explicitly associated with private subnets (`depi
 2. The SSM Agent running on the instance maintains an outbound TLS tunnel via PrivateLink interface endpoints (`ssm`, `ssmmessages`, `ec2messages`).
 3. Interactive shell sessions are established entirely without public IPs, internet gateways, or inbound port 22 access. Verified that instances have no public IPs and NACL rule 200 denies port 22; direct external SSH execution was not performed.
 
+### 7.5. VPC-Level Network Monitoring & Traffic Telemetry (VPC Flow Logs)
+1. **Architectural Scope & Placement:** In accordance with Task 15, `aws_flow_log.app_vpc_flow_log` (Flow Log ID: `fl-01baa2f74df906054`, Status: `ACTIVE`) is attached directly at the root VPC boundary of `depi-sec-app-vpc` (`vpc-0f7551daf8a303b6b`). Establishing monitoring at the VPC level provides universal, continuous coverage across all existing and dynamically provisioned Elastic Network Interfaces (ENIs) without requiring per-subnet or per-instance flow logs:
+   - Public Application Load Balancer nodes across AZs (`10.0.1.0/24` and `10.0.2.0/24`).
+   - Private EC2 compute instances (`depi-sec-app-a` at `10.0.11.161` and `depi-sec-app-b` at `10.0.12.241`).
+   - Private RDS MySQL database instance (`10.0.12.157`).
+   - Amazon EFS mount targets across both private subnets.
+   - VPC Interface Endpoints (PrivateLink) for Systems Manager and EC2 messaging.
+2. **Out-of-Band Hypervisor-Level Telemetry:** VPC Flow Logs collect network traffic metadata out-of-band at the AWS Nitro hypervisor layer, independently of guest operating system and application logging mechanisms:
+   - **Independent Metadata Collection:** Because collection operates within the AWS network virtualization layer, connection metadata is captured even if in-guest logging is disabled, misconfigured, or unavailable.
+   - **Minimal Host Impact:** Flow logging is decoupled from the virtual machine instances, avoiding CPU, memory, or storage I/O consumption on the guest workloads and avoiding the introduction of inline proxy latency into application data paths.
+   - **Decoupled from Guest OS:** Because telemetry generation occurs outside the guest operating system boundary, administrative or compromised users within the virtual machine cannot disable, intercept, or manipulate the flow log stream.
+3. **Capture Configuration & Delivery Pipeline:** Configured with `traffic_type = "ALL"`, the flow log records both permitted sessions (`ACCEPT`) and blocked packets (`REJECT`). Flow records are aggregated and published to Amazon CloudWatch Log Group `/depi-sec/vpc/flowlogs` (14-day retention) via least-privilege IAM service role `depi-sec-vpc-flow-logs-role` (`vpc-flow-logs.amazonaws.com`). The delivery status is confirmed as `SUCCESS`.
+4. **Standard Telemetry Format (14 Default Fields):** Each record is formatted using the 14 default space-delimited fields: `version`, `account-id`, `interface-id`, `srcaddr`, `dstaddr`, `srcport`, `dstport`, `protocol`, `packets`, `bytes`, `start`, `end`, `action`, and `log-status`.
+5. **Empirical Findings & Security Analysis:**
+   - Active `ACCEPT` records demonstrate authorized application delivery (ALB to EC2 over TCP port 80), storage communications (EC2 to EFS over TCP port 2049), and Systems Manager management sessions (EC2 to VPC endpoints over TCP port 443).
+   - A CloudWatch Logs Insights query explicitly scoped to `/depi-sec/vpc/flowlogs` filtering on `dstport = "22"` and `action = "REJECT"` isolated four distinct dropped connection attempts. These include an internal lateral probe from `depi-sec-app-a` (`10.0.11.161`) to `depi-sec-app-b` (`10.0.12.241`) on destination TCP port 22 that timed out with exit code 124, alongside external reconnaissance hitting public ALB interfaces (`10.0.2.49`, `10.0.1.109`).
+   - *Security Enforcement Boundary & Attribution:* This empirical verification confirms Layer 4 TCP network isolation and is distinct from an interactive SSH authentication test, which was not executed. While the Flow Log confirms that unauthorized port 22 traffic is rejected at the network interface layer, flow log records do not differentiate whether the drop was enforced by the stateless Network ACL (`depi-sec-private-nacl` Rule 200) or by the stateful Security Group (`depi-sec-app-sg`), as both firewalls strictly deny inbound port 22.
+
 ---
 
 ## 8. Architectural Limitations & Security Boundary Analysis
@@ -265,3 +284,4 @@ As required by the project specifications, the architecture incorporates educati
 | **EFS Mount Targets** | Private Subnets (Multi-AZ) | Colocates NFS targets in the same subnets as the EC2 instances to minimize latency and ensure NFS traffic never leaves the private subnet boundary. |
 | **RDS MySQL** | Private Subnets (DB Subnet Group) | Database engines must never reside in public subnets. Restricting access to internal application security groups eliminates direct internet brute force or exploit exposure. |
 | **VPC Endpoints** | Private Subnets / Route Tables | Keeps management (SSM) and object storage (S3) traffic entirely on AWS private infrastructure, saving NAT Gateway data processing costs and eliminating public egress routes. |
+| **VPC Flow Logs** | VPC Root (`vpc-0f7551daf8a303b6b`) | Out-of-band, hypervisor-level monitoring across all ENIs in all subnets, capturing network traffic metadata into CloudWatch Logs independently of guest instances without consuming host instance compute resources. |

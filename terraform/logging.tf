@@ -92,3 +92,86 @@ resource "aws_cloudtrail" "trail" {
     aws_iam_role_policy.cloudtrail_cw_policy
   ]
 }
+
+# ==============================================================================
+# Task 15: VPC Flow Logs & CloudWatch Logs Integration
+# ==============================================================================
+
+# CloudWatch Log Group for VPC Flow Logs (14-day retention)
+resource "aws_cloudwatch_log_group" "vpc_flow_logs" {
+  name              = "/depi-sec/vpc/flowlogs"
+  retention_in_days = 14
+}
+
+# IAM Role assumed by VPC Flow Logs service to publish logs to CloudWatch Logs
+resource "aws_iam_role" "vpc_flow_logs_role" {
+  name = "depi-sec-vpc-flow-logs-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "VPCFlowLogsAssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "vpc-flow-logs.amazonaws.com"
+        }
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
+}
+
+# Least-privilege IAM Policy for VPC Flow Logs CloudWatch publishing
+# logs:CreateLogStream, logs:PutLogEvents, and logs:DescribeLogStreams are strictly scoped
+# to the destination CloudWatch Log Group and its log streams.
+# logs:DescribeLogGroups requires Resource = "*" because AWS IAM does not support
+# resource-level ARN constraints for CloudWatch Logs DescribeLogGroups API operations.
+resource "aws_iam_role_policy" "vpc_flow_logs_policy" {
+  name = "depi-sec-vpc-flow-logs-policy"
+  role = aws_iam_role.vpc_flow_logs_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "VPCFlowLogsScopedGroupAndStreamActions"
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogStream",
+          "logs:PutLogEvents",
+          "logs:DescribeLogStreams"
+        ]
+        Resource = [
+          aws_cloudwatch_log_group.vpc_flow_logs.arn,
+          "${aws_cloudwatch_log_group.vpc_flow_logs.arn}:*"
+        ]
+      },
+      {
+        Sid    = "VPCFlowLogsDescribeLogGroups"
+        Effect = "Allow"
+        Action = [
+          "logs:DescribeLogGroups"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+# VPC Flow Log capturing ALL traffic on the application VPC
+resource "aws_flow_log" "app_vpc_flow_log" {
+  iam_role_arn         = aws_iam_role.vpc_flow_logs_role.arn
+  log_destination      = aws_cloudwatch_log_group.vpc_flow_logs.arn
+  log_destination_type = "cloud-watch-logs"
+  traffic_type         = "ALL"
+  vpc_id               = aws_vpc.app_vpc.id
+
+  tags = {
+    Name = "depi-sec-vpc-flow-log"
+  }
+
+  depends_on = [
+    aws_iam_role_policy.vpc_flow_logs_policy
+  ]
+}

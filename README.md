@@ -5,7 +5,7 @@ This project delivers an enterprise-grade, defense-in-depth web infrastructure o
 The architecture enforces strict network isolation across two Availability Zones, hosting compute and database workloads in private subnets with zero public IP addresses.
 Public user traffic is accelerated and secured at the perimeter via an AWS CloudFront distribution configured with HTTPS viewer access and custom origin header verification.
 In-depth security controls include tiered security group chaining, stateless Network ACLs, AWS Systems Manager keyless administration, and S3 Block Public Access.
-Centralized governance incorporates automated AWS Budgets cost alerts, Secrets Manager credential management, and CloudWatch Standard Logging v2.
+Centralized governance incorporates automated AWS Budgets cost alerts, Secrets Manager credential management, multi-region AWS CloudTrail auditing, and CloudWatch Standard Logging v2 alongside VPC Flow Logs network traffic capture.
 
 ---
 
@@ -86,7 +86,7 @@ flowchart TB
 ### Architecture Description
 The architecture separates public ingress from backend processing and storage across two Availability Zones (`us-east-1a` and `us-east-1b`). Clients access the web application through **AWS CloudFront** over HTTPS, which injects a cryptographic custom header (`X-Origin-Verify`). The **Application Load Balancer (ALB)** in the public subnets checks for this header; direct access to the ALB without the header is blocked with a `403 Forbidden`.
 
-The application tier runs on private Amazon Linux 2023 EC2 instances (`depi-sec-app-a` and `depi-sec-app-b`) with **no public IPs**. Compute instances mount an encrypted **Amazon EFS** shared file system and query a private **Amazon RDS MySQL 8.0** instance. Direct management is handled out-of-band via **AWS Systems Manager Session Manager** through dedicated VPC Interface Endpoints, while S3 storage requests utilize a private **VPC Gateway Endpoint**, ensuring zero exposure to the public internet.
+The application tier runs on private Amazon Linux 2023 EC2 instances (`depi-sec-app-a` and `depi-sec-app-b`) with **no public IPs**. Compute instances mount an encrypted **Amazon EFS** shared file system and query a private **Amazon RDS MySQL 8.0** instance. Direct management is handled out-of-band via **AWS Systems Manager Session Manager** through dedicated VPC Interface Endpoints, while S3 storage requests utilize a private **VPC Gateway Endpoint**, ensuring zero exposure to the public internet. Comprehensive auditing is provided by multi-region **AWS CloudTrail** (auditing management actions and S3 data events into a centralized log bucket and CloudWatch Logs) and VPC-level **VPC Flow Logs** (`depi-sec-vpc-flow-log`), which captures all network IP traffic across every ENI and publishes to Amazon CloudWatch Logs.
 
 ---
 
@@ -121,6 +121,8 @@ The application tier runs on private Amazon Linux 2023 EC2 instances (`depi-sec-
 | **SEC-11** | Private RDS MySQL with Secrets Manager | Amazon RDS / Secrets | Direct external database access; internal TCP port 3306 connectivity verified via bash probe *(MySQL auth/queries not tested)* | [11-rds-internal-connection.png](screenshots/11-rds/11-rds-internal-connection.png) | **Verified (Network Reachability)** |
 | **SEC-12** | ALB Target Health Checks & Failover | AWS Elastic Load Balancing | Service disruption from compute failure; detected unhealthy target and routed requests to healthy target *(recovered upon restart)* | [12-alb-failover-working.png](screenshots/12-alb/12-alb-failover-working.png) | **Verified** |
 | **SEC-13** | CloudFront HTTPS & Origin Verification | AWS CloudFront / ALB | Cleartext eavesdropping; browser HTTPS access verified; direct ALB access returns 403 Forbidden | [13-cloudfront-alb-denied.png](screenshots/13-cloudfront/13-cloudfront-alb-denied.png) | **Verified** |
+| **SEC-14** | Multi-Region Audit Logging (CloudTrail) | AWS CloudTrail | Undetected API modifications, administrative credential misuse, unauthorized security group or IAM changes | [14-cloudtrail-settings.png](screenshots/14-cloudtrail/14-cloudtrail-settings.png) | **Verified** |
+| **SEC-15** | VPC Flow Logs Network Traffic Auditing | Amazon VPC / CloudWatch Logs | Undetected lateral network movement, unauthorized port scanning, data exfiltration, covert channel communication | [15-flowlog-reject-record.png](screenshots/15-flowlogs/15-flowlog-reject-record.png) | **Verified** |
 
 > Comprehensive threat model analyses and controls descriptions are available in [docs/security-controls.md](docs/security-controls.md).
 
@@ -197,13 +199,13 @@ Terraform will display the provisioned endpoints upon successful completion:
 
 ## 7. How to verify
 
-Verification follows the standardized 10-test protocol defined in Task 20. Completed tests (Tasks 1–13) have been empirically verified and are documented below strictly based on observed evidence. Pending tests requiring Tasks 14–20 are designated accordingly.
+Verification follows the standardized 10-test protocol defined in Task 20. Completed tests (Tasks 1–15) have been empirically verified and are documented below strictly based on observed evidence. Pending tests requiring Tasks 16–20 are designated accordingly.
 
 | # | Test Action | Expected Result | Verified Result | Status | Screenshot Link |
 | :-: | :--- | :--- | :--- | :-: | :--- |
 | **1** | Open ALB DNS name directly in browser / CLI | HTTP `403 Forbidden` | `curl.exe` returned `403`; browser rendered `"Access Denied"` | **PASS** | [13-cloudfront-alb-denied.png](screenshots/13-cloudfront/13-cloudfront-alb-denied.png) |
 | **2** | Open CloudFront distribution URL | Page loads over HTTPS | Loaded `https://dfj4o8x4memfi.cloudfront.net` displaying backend page | **PASS** | [13-cloudfront-https-working.png](screenshots/13-cloudfront/13-cloudfront-https-working.png) |
-| **3** | Direct SSH to private EC2 instance IP | Unreachable / Timeout | Verified instances have no public IPs (`-`) and NACL denies port 22; active SSH command **not executed** | **PARTIAL** | [08-ec2-app-a-no-public-ip.png](screenshots/08-session-manager/08-ec2-app-a-no-public-ip.png) |
+| **3** | Direct SSH to private EC2 instance IP | Unreachable / Timeout; REJECT record in Flow Logs | Verified instances have no public IPs (`-`); internal TCP port 22 probe from `10.0.11.161` to `10.0.12.241` timed out with exit code 124; CloudWatch Logs Insights confirmed 4 corresponding `REJECT` records on destination TCP port 22; validates TCP network isolation without definitive rule attribution (interactive SSH authentication not tested) | **PASS (Network Isolation & Flow Log REJECT Verified)** | [15-flowlog-reject-record.png](screenshots/15-flowlogs/15-flowlog-reject-record.png) |
 | **4** | Connect to RDS from external network | Connection timeout | PowerShell `Test-NetConnection` failed (`TcpTestSucceeded : False`); `Publicly accessible: No` | **PASS** | [11-rds-external-connection-failed.png](screenshots/11-rds/11-rds-external-connection-failed.png) |
 | **5** | Connect to RDS from app server via SSM | Port 3306 reachable | Bash `/dev/tcp` probe confirmed: `SUCCESS: RDS port 3306 is reachable` *(MySQL auth/queries not tested)* | **PASS (Network Reachability)** | [11-rds-internal-connection.png](screenshots/11-rds/11-rds-internal-connection.png) |
 | **6** | Make S3 object public in bucket | Rejected by Block Public Access | Unauthenticated `curl.exe -I` returned `HTTP/1.1 403 Forbidden`; explicit public ACL mutation **not executed** | **PASS (Anonymous Read Refusal) / PARTIAL** | [10-s3-public-access-refused.png](screenshots/10-s3/10-s3-public-access-refused.png) |
@@ -334,6 +336,39 @@ All screenshot evidence is organized into dedicated task directories adhering to
 - **Standard Logging v2 Delivery:** Demonstrates CloudWatch access logs delivering to S3 logs bucket.<br>
   ![CloudFront Logging](screenshots/13-cloudfront/13-cloudfront-logging.png)
 
+### Task 14 — AWS CloudTrail & Governance Logging
+- **CloudTrail Configuration & Delivery Settings:** Confirms multi-region logging active for `depi-sec-trail`, log file validation enabled, and delivery to centralized S3 logs bucket (`depi-sec-logs-*`) and CloudWatch Log Group `/aws/cloudtrail/depi-sec-trail` with 14-day retention.<br>
+  ![CloudTrail Settings](screenshots/14-cloudtrail/14-cloudtrail-settings.png)
+- **CloudTrail Management Event & Identity Record:** Displays recorded management event (`StartLogging`) verifying user identity (`terraform-admin`), IAM user ARN, access key ID, source IP address (`156.217.85.8`), and event details.<br>
+  ![CloudTrail Event Identity](screenshots/14-cloudtrail/14-cloudtrail-event-identity.png)
+
+### Task 15 — VPC Flow Logs & Network Traffic Auditing
+- **CloudWatch Logs Insights Port 22 REJECT Record:** Demonstrates VPC Flow Logs capturing IP traffic across `depi-sec-app-vpc` to log group `/depi-sec/vpc/flowlogs`. A CloudWatch Logs Insights query explicitly scoped to log group `/depi-sec/vpc/flowlogs` (filtering on `dstport = "22" and action = "REJECT"`) returned four matching records, including an internal TCP port 22 connection attempt from `depi-sec-app-a` (`10.0.11.161`) to `depi-sec-app-b` (`10.0.12.241`) that timed out with exit code 124, verifying Layer 4 network isolation without definitive rule attribution (interactive SSH authentication not tested).<br>
+  ![VPC Flow Log REJECT Record](screenshots/15-flowlogs/15-flowlog-reject-record.png)
+
+#### Explanation of the 14 Default VPC Flow Log Fields
+AWS VPC Flow Logs capture network IP traffic metadata using 14 standard space-delimited fields. The verified REJECT record observed in CloudWatch Logs Insights is:
+```text
+2 882034443616 eni-0b401abe98593901c 10.0.11.161 10.0.12.241 58932 22 6 3 180 1792100814 1792100825 REJECT OK
+```
+
+| Field # | Field Name | Description | Verified Record Value |
+| :-: | :--- | :--- | :--- |
+| **1** | `version` | The VPC Flow Log version format. Version `2` corresponds to the standard default AWS format. | `2` |
+| **2** | `account-id` | The 12-digit AWS account ID of the resource owner. | `882034443616` |
+| **3** | `interface-id` | The Elastic Network Interface (ENI) identifier on which the traffic was recorded. | `eni-0b401abe98593901c` |
+| **4** | `srcaddr` | The source IPv4 address of the originating network entity. | `10.0.11.161` (`depi-sec-app-a`) |
+| **5** | `dstaddr` | The destination IPv4 address targeted by the network connection. | `10.0.12.241` (`depi-sec-app-b`) |
+| **6** | `srcport` | The source port number chosen by the sending host. | `58932` |
+| **7** | `dstport` | The destination port number targeted by the traffic (e.g., port 22 for SSH). | `22` |
+| **8** | `protocol` | The IANA standard protocol number (e.g., `6` for TCP, `17` for UDP, `1` for ICMP). | `6` (TCP) |
+| **9** | `packets` | The total number of packets transferred during the capture aggregation window. | `3` |
+| **10** | `bytes` | The cumulative count of bytes transferred during the capture aggregation window. | `180` |
+| **11** | `start` | The Unix timestamp (in epoch seconds) marking the beginning of the aggregation interval. | `1792100814` |
+| **12** | `end` | The Unix timestamp (in epoch seconds) marking the end of the aggregation interval. | `1792100825` |
+| **13** | `action` | The security decision applied to the traffic: `ACCEPT` (permitted by both SG and NACL) or `REJECT` (blocked by SG or NACL). | `REJECT` |
+| **14** | `log-status` | The operational status of the logging service: `OK` (logged normally), `NODATA` (no traffic during interval), or `SKIPDATA` (records skipped due to internal capacity constraints). | `OK` |
+
 ---
 
 ## 9. Cost notes
@@ -352,6 +387,8 @@ Building secure cloud platforms requires understanding which services incur hour
 | **AWS Secrets Manager** | $0.40/secret/month | ~$0.40 / month | Single secret storing database master credentials |
 | **AWS CloudFront** | 1 TB free transfer per month | $0.00 / month | `PriceClass_100` (North America and Europe) |
 | **Amazon EFS** | 5 GB free storage per month | $0.00 / month | Lightweight access point with TLS encryption |
+| **AWS CloudTrail** | Free tier for 1st management copy | ~$0.00 / month | Multi-region trail with S3 read data events scoped to app bucket |
+| **Amazon CloudWatch Logs (VPC Flow Logs)** | $0.50/GB ingested + $0.03/GB/mo storage | ~$0.25 / month | Aggregates VPC-level network traffic with 14-day retention |
 
 ### Cost Guardrail Safeguards & Budget Boundaries
 - An active monthly budget (`depi-sec-monthly`) of **$10.00 USD** is enforced.
@@ -409,12 +446,14 @@ Open the AWS Management Console in `us-east-1` and verify that the following das
 8. **Automated cost controls must include proactive policy enforcement.** Relying solely on email alerts during a compromise or accidental deployment is insufficient; configuring automated IAM actions that attach deny policies at budget thresholds prevents creating expensive new resources, though running resources must still be managed.
 9. **Terraform lifecycle blocks and dependency ordering are vital for zero-downtime operations.** Utilizing `lifecycle { ignore_changes = [ami] }` prevents unexpected instance replacements when AWS publishes updated base AMIs, and explicit `depends_on` clauses ensure storage mount targets exist before compute instances attempt mounts.
 10. **Negative testing is as critical as positive functional testing.** Validating that unauthorized actions fail (e.g., verifying 403 Forbidden on direct ALB access, TCP connection failures on RDS from external networks, and refused public S3 reads) provides empirical proof that security controls are genuinely active without assuming unexecuted application layers.
+11. **Comprehensive network visibility requires passive flow auditing at the VPC root boundary.** Provisioning VPC Flow Logs at the VPC level provides unified visibility into every Elastic Network Interface without requiring in-guest agents and operating independently of guest operating system and application workloads. Analyzing the 14 default fields enables engineers to distinguish normal traffic (`ACCEPT`) from scanning activity or unauthorized lateral movement (`REJECT`) across both public and private subnets.
+12. **Audit trails require multi-layered log shipping to prevent tampering.** Streaming CloudTrail management and data events simultaneously to encrypted Amazon S3 (for long-term tamper-evident archival with log file validation) and Amazon CloudWatch Logs (for real-time metric filtering and rapid querying via CloudWatch Logs Insights) combines immutability with incident response agility.
 
 ---
 
 ## 12. Known limitations
 
-While the platform implements rigorous security controls for completed Tasks 1–13, several known architectural limitations exist that should be addressed in a production deployment:
+While the platform implements rigorous security controls for completed Tasks 1–15, several known architectural limitations exist that should be addressed in a production deployment:
 
 1. **Unencrypted HTTP Between CloudFront and Application Load Balancer:**
    - *Limitation:* The CloudFront origin protocol policy is set to `http-only` on port 80 as mandated by the educational project scope.
@@ -433,5 +472,5 @@ While the platform implements rigorous security controls for completed Tasks 1�
 5. **Cost Monitoring vs Hard Spending Limits:**
    - *Limitation:* AWS Budgets provides alerts and automated IAM deny policies for new resources, but AWS does not natively enforce hard billing caps that automatically terminate running infrastructure.
    - *Production Solution:* Deploy automated EventBridge and Lambda functions to shut down or delete test resources if budget thresholds are breached.
-6. **Outstanding Project Tasks (Tasks 14–20):**
-   - Centralized management audit logging (CloudTrail), VPC Flow Logs network traffic capture, CloudWatch alarms and operations dashboard, automated Lambda security remediation, VPC Peering for administrative isolation, and immutable AWS Backup vault locking remain to be completed in subsequent implementation phases.
+6. **Outstanding Project Tasks (Tasks 16–20):**
+   - Security metric alarms and operations dashboard (Task 16), automated Lambda security remediation (Task 17), VPC Peering for administrative isolation (Task 18), immutable AWS Backup vault locking (Task 19), and final teardown/cost validation (Task 20) remain to be completed in subsequent implementation phases. Tasks 1–15 are fully deployed, verified, and documented.

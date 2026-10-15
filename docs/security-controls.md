@@ -1,12 +1,12 @@
 # Security Controls Matrix — Secure AWS Web Platform
 
-This document serves as the primary security compliance audit reference for the platform. It details each security control implemented across **Tasks 1–13**, identifying the governing AWS service, the threat or attack vector mitigated, the implementation mechanism in Terraform, and the verifying screenshot evidence.
+This document serves as the primary security compliance audit reference for the platform. It details each security control implemented across **Tasks 1–15**, identifying the governing AWS service, the threat or attack vector mitigated, the implementation mechanism in Terraform, and the verifying screenshot evidence.
 
-Unimplemented controls scheduled for **Tasks 14–20** are clearly designated as **Pending Implementation** at the conclusion of this document.
+Unimplemented controls scheduled for **Tasks 16–20** are clearly designated as **Pending Implementation** at the conclusion of this document.
 
 ---
 
-## 1. Security Controls Master Table (Tasks 1–13)
+## 1. Security Controls Master Table (Tasks 1–15)
 
 | Control ID | Security Control | AWS Service | Threat Mitigated | Terraform Implementation | Verifying Screenshot | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -23,6 +23,8 @@ Unimplemented controls scheduled for **Tasks 14–20** are clearly designated as
 | **SEC-11** | **Private Relational Database Isolation & Secrets Management** | Amazon RDS & Secrets Manager | Database credential leakage in source control; direct internet SQL injection or port 3306 attacks. | RDS MySQL deployed in private DB subnet group; `publicly_accessible = false`; storage encrypted with KMS (`gp3`); master password generated dynamically via `random_password` and stored in AWS Secrets Manager (`depi-sec-db-credentials`). External TCP probe failed (`TcpTestSucceeded : False`); internal bash TCP probe confirmed port 3306 reachable. *Note: MySQL authentication and query execution were not tested.* | [`11-rds-encryption.png`](../screenshots/11-rds/11-rds-encryption.png)<br>[`11-rds-private-access.png`](../screenshots/11-rds/11-rds-private-access.png)<br>[`11-rds-internal-connection.png`](../screenshots/11-rds/11-rds-internal-connection.png)<br>[`11-rds-external-connection-failed.png`](../screenshots/11-rds/11-rds-external-connection-failed.png) | **Verified (Network Reachability)** |
 | **SEC-12** | **Application Load Balancing & Target Health Checking** | AWS Elastic Load Balancing | Single point of failure; compute instance failure taking down web services. | Application Load Balancer deployed across public subnets in two AZs; target group checks HTTP `/` every 30s. Target failure detected when web service stopped on `app-a`; traffic served by healthy target `app-b`. Targets recovered to Healthy upon restart (*timing/zero-downtime claims omitted*). | [`12-alb-healthy-targets.png`](../screenshots/12-alb/12-alb-healthy-targets.png)<br>[`12-alb-unhealthy-target.png`](../screenshots/12-alb/12-alb-unhealthy-target.png)<br>[`12-alb-failover-working.png`](../screenshots/12-alb/12-alb-failover-working.png)<br>[`12-alb-recovered.png`](../screenshots/12-alb/12-alb-recovered.png)<br>[`12-alb-working-page.png`](../screenshots/12-alb/12-alb-working-page.png)<br>[`12-alb-app-b.png`](../screenshots/12-alb/12-alb-app-b.png) | **Verified** |
 | **SEC-13** | **Edge Protection, HTTPS Enforcement & Origin Header Gating** | AWS CloudFront & ALB | Eavesdropping on viewer connections; bypass of CloudFront caching and rate-limiting policies. | CloudFront distribution configured with `redirect-to-https` viewer protocol policy. Injects a 32-character secret `X-Origin-Verify` header. ALB listener default action returns `403 Forbidden` for direct requests; forward action triggers only when header matches. Browser HTTPS access verified; access logs delivered via CloudFront Standard Logging v2. | [`13-cloudfront-https-working.png`](../screenshots/13-cloudfront/13-cloudfront-https-working.png)<br>[`13-cloudfront-alb-denied.png`](../screenshots/13-cloudfront/13-cloudfront-alb-denied.png)<br>[`13-cloudfront-403-status.png`](../screenshots/13-cloudfront/13-cloudfront-403-status.png)<br>[`13-cloudfront-logging.png`](../screenshots/13-cloudfront/13-cloudfront-logging.png) | **Verified** |
+| **SEC-14** | **Centralized Management Audit Logging** | AWS CloudTrail | Undetected API modifications, administrative credential misuse, unauthorized security group or IAM changes. | Multi-region trail `depi-sec-trail` with log file validation, management events (Read/Write: All), and S3 read data events for `depi-sec-app-*`. Delivers logs to central S3 logs bucket (`depi-sec-logs-*`) and CloudWatch Log Group `/aws/cloudtrail/depi-sec-trail` (14-day retention) via IAM role `depi-sec-cloudtrail-cw-role`. S3 bucket policy enforces `aws:SourceArn` restriction and `bucket-owner-full-control`. | [`14-cloudtrail-settings.png`](../screenshots/14-cloudtrail/14-cloudtrail-settings.png)<br>[`14-cloudtrail-event-identity.png`](../screenshots/14-cloudtrail/14-cloudtrail-event-identity.png) | **Verified** |
+| **SEC-15** | **VPC Flow Logs & Network Traffic Auditing** | Amazon VPC & CloudWatch Logs | Undetected lateral network movement, unauthorized port scanning, data exfiltration, covert channel communication. | `aws_flow_log.app_vpc_flow_log` (`fl-01baa2f74df906054`) attached to `aws_vpc.app_vpc` (`vpc-0f7551daf8a303b6b`) for `traffic_type = "ALL"`, publishing to `/depi-sec/vpc/flowlogs` (14-day retention) via least-privilege role `depi-sec-vpc-flow-logs-role`. Ingested `ACCEPT` records and 4 `REJECT` records on destination TCP port 22 verified via CloudWatch Logs Insights (including internal source `10.0.11.161` to `10.0.12.241`). | [`15-flowlog-reject-record.png`](../screenshots/15-flowlogs/15-flowlog-reject-record.png) | **Verified** |
 
 ---
 
@@ -46,16 +48,53 @@ While the combination of CloudFront and ALB provides effective educational defen
 
 ---
 
-## 3. Pending Security Controls (Tasks 14–20)
+## 3. In-Depth Analysis: VPC Flow Logs & Network Security Telemetry
+
+As part of Task 15, comprehensive network observability is established at the root of `depi-sec-app-vpc` to provide persistent Layer 3 and Layer 4 security telemetry.
+
+### 3.1. Flow Log Configuration & Scope
+- **Resource Identifier:** `aws_flow_log.app_vpc_flow_log` (Flow Log ID: `fl-01baa2f74df906054`).
+- **Attachment Scope:** Attached directly to VPC `vpc-0f7551daf8a303b6b`. Monitoring at the VPC root automatically monitors every Elastic Network Interface (ENI) across all subnets (ALB nodes, EC2 app instances, RDS MySQL, EFS mount points, and VPC endpoints).
+- **Independent Collection:** Flow logs collect network traffic metadata independently of guest operating system and application logging mechanisms, ensuring network visibility even if in-guest logging fails or is disabled.
+- **Traffic Capture:** `traffic_type = "ALL"`, ensuring both permitted traffic (`ACCEPT`) and dropped packets (`REJECT`) are recorded.
+- **Log Destination:** Amazon CloudWatch Log Group `/depi-sec/vpc/flowlogs` with a 14-day retention window. Delivery status is confirmed as `SUCCESS`.
+- **Service Delegation:** Assumes IAM role `depi-sec-vpc-flow-logs-role` (`vpc-flow-logs.amazonaws.com`) with policy `depi-sec-vpc-flow-logs-policy` strictly scoped to the log group ARN.
+
+### 3.2. Telemetry Structure & Default Fields
+Telemetry is ingested using the 14 standard space-delimited fields:
+`version account-id interface-id srcaddr dstaddr srcport dstport protocol packets bytes start end action log-status`
+
+### 3.3. Empirical Audit Evidence & Findings
+CloudWatch Logs Insights query explicitly scoped to `/depi-sec/vpc/flowlogs`:
+```text
+fields @timestamp, @message
+| parse @message "* * * * * * * * * * * * * *" as version, account, eni, srcaddr, dstaddr, srcport, dstport, protocol, packets, bytes, startTime, endTime, action, logStatus
+| filter dstport = "22" and action = "REJECT"
+| sort @timestamp desc
+| limit 20
+```
+
+- **Observed Findings:**
+  1. **Operational Traffic Delivery:** Ingested flow records show active `ACCEPT` entries for authorized HTTP application traffic (ALB -> EC2), EFS NFS storage access (EC2 -> EFS port 2049), and SSM management sessions (EC2 -> VPC endpoints port 443).
+  2. **External Inbound Reconnaissance:** Three `REJECT` records documented internet sources (`46.109.171.236`, `193.163.125.173`) scanning destination port 22 on public ALB interfaces (`10.0.2.49`, `10.0.1.109`).
+  3. **Internal Lateral Movement Attempt:** One `REJECT` record documented an internal connection attempt originating from `depi-sec-app-a` (`10.0.11.161`) targeting `depi-sec-app-b` (`10.0.12.241`) on destination TCP port 22. At the client probe layer, this connection attempt timed out with exit code `124`, matching the recorded flow log REJECT entry:
+     `2 882034443616 eni-0b401abe98593901c 10.0.11.161 10.0.12.241 58932 22 6 3 180 1792100814 1792100825 REJECT OK`
+
+### 3.4. Security Boundary & Attribution Boundary
+VPC Flow Logs record the packet evaluation decision (`REJECT`) at the network interface layer.
+- **Verification Scope:** This validation confirms Layer 4 TCP network isolation. It is distinct from a full interactive SSH authentication test (negotiating host keys, testing user credentials, or opening a shell session), which was not performed because instances have no open port 22 and are managed keylessly via AWS Systems Manager Session Manager.
+- **Rule Attribution Boundary:** While the log conclusively verifies that unauthorized port 22 traffic was dropped at the network interface, flow log records do not differentiate whether the drop was enforced by the stateless Network ACL (`depi-sec-private-nacl` Inbound Rule 200) or by the stateful Security Group (`depi-sec-app-sg`), as both security controls strictly prohibit inbound TCP port 22.
+
+---
+
+## 4. Pending Security Controls (Tasks 16–20)
 
 The following controls represent outstanding project tasks that have not yet been implemented or deployed in Terraform:
 
 | Task | Control | Planned AWS Service | Planned Threat Mitigation | Current Status |
 | :--- | :--- | :--- | :--- | :--- |
-| **Task 14** | **Centralized Management Audit Logging** | AWS CloudTrail | Undetected API changes, root account usage, insider privilege misuse. | *Pending implementation in `logging.tf`* |
-| **Task 15** | **VPC Flow Logs & Network Traffic Auditing** | Amazon CloudWatch Logs / VPC Flow Logs | Undetected port scans, data exfiltration, lateral network exploration. | *Pending implementation in `logging.tf`* |
 | **Task 16** | **Security Metric Alarms & Operations Dashboard** | Amazon CloudWatch & SNS | Delayed incident awareness for failing targets or unauthorized root activity. | *Pending implementation in `logging.tf`* |
 | **Task 17** | **Event-Driven Security Auto-Remediation** | AWS Lambda & EventBridge | Rogue security group rule modification opening port 22/3306 to `0.0.0.0/0`. | *Pending implementation in `lambda.tf`* |
 | **Task 18** | **Isolated Management Network (VPC Peering)** | AWS VPC Peering | Direct public access for operations; unsegmented administrative tools. | *Pending implementation in `peering.tf`* |
 | **Task 19** | **Immutable Ransomware-Resistant Backups** | AWS Backup (Vault Lock) | Ransomware deletion of snapshots, accidental administrator destruction of backups. | *Pending implementation in `backup.tf`* |
-| **Task 20** | **End-to-End Security Audit & Clean Destroy** | Terraform CLI & AWS Console | Unmonitored lingering infrastructure, resource leakage, cost overruns. | *Pending final execution after Tasks 14–19* |
+| **Task 20** | **End-to-End Security Audit & Clean Destroy** | Terraform CLI & AWS Console | Unmonitored lingering infrastructure, resource leakage, cost overruns. | *Pending final execution after Tasks 16–19* |

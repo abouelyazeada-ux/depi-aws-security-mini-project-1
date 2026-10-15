@@ -1,8 +1,8 @@
-# Security Testing & Verification Report — Tasks 1–13
+# Security Testing & Verification Report — Tasks 1–15
 
-This document records the empirical validation of the security controls implemented in **Tasks 1–13**, following the standardized test framework outlined in **Task 20** of `Project-1.pdf`.
+This document records the empirical validation of the security controls implemented in **Tasks 1–15**, following the standardized test framework outlined in **Task 20** of `Project-1.pdf`.
 
-Each test case details the operational procedure performed, the expected security outcome, the observed real-world behavior, and links to the supporting screenshot evidence. Tests are strictly documented based on confirmed evidence without assuming or inferring unexecuted steps. Tests associated with **Tasks 14–20** that require pending infrastructure are explicitly identified as **Pending Implementation**.
+Each test case details the operational procedure performed, the expected security outcome, the observed real-world behavior, and links to the supporting screenshot evidence. Tests are strictly documented based on confirmed evidence without assuming or inferring unexecuted steps. Tests associated with **Tasks 16–20** that require pending infrastructure are explicitly identified as **Pending Implementation**.
 
 ---
 
@@ -12,7 +12,7 @@ Each test case details the operational procedure performed, the expected securit
 | :-: | :--- | :--- | :--- | :--- | :-: | :--- |
 | **1** | Open ALB DNS name directly in browser / CLI | Application Load Balancer (`depi-sec-alb`) | HTTP `403 Forbidden` | Returned HTTP 403 status code and body `"Access Denied"` | **PASS** | [`13-cloudfront-alb-denied.png`](../screenshots/13-cloudfront/13-cloudfront-alb-denied.png)<br>[`13-cloudfront-403-status.png`](../screenshots/13-cloudfront/13-cloudfront-403-status.png) |
 | **2** | Open CloudFront distribution URL | AWS CloudFront (`depi-sec-cloudfront`) | Page loads over HTTPS | Loaded `https://dfj4o8x4memfi.cloudfront.net` displaying backend page | **PASS** | [`13-cloudfront-https-working.png`](../screenshots/13-cloudfront/13-cloudfront-https-working.png) |
-| **3** | Direct SSH attempt to private EC2 instance | EC2 Application Tier (`depi-sec-app-a/b`) | Timeout / Unreachable | Instances have no public IPs; NACL denies port 22; direct SSH command **not executed** | **PARTIAL** | [`08-ec2-app-a-no-public-ip.png`](../screenshots/08-session-manager/08-ec2-app-a-no-public-ip.png)<br>[`08-ec2-app-b-no-public-ip.png`](../screenshots/08-session-manager/08-ec2-app-b-no-public-ip.png)<br>[`06-nacl-inbound-rules.png`](../screenshots/06-nacl/06-nacl-inbound-rules.png) |
+| **3** | Direct SSH attempt to private EC2 instance | EC2 Application Tier & VPC Flow Logs | Inbound SSH blocked; REJECT record in VPC Flow Logs | Zero public IPs; internal TCP port 22 probe from 10.0.11.161 to 10.0.12.241 timed out (exit code 124); CloudWatch Logs Insights confirmed 4 REJECT records on TCP port 22; validates TCP network isolation without definitive rule attribution (interactive SSH authentication not tested) | **PASS (Network Isolation & Flow Log REJECT Verified)** | [`08-ec2-app-a-no-public-ip.png`](../screenshots/08-session-manager/08-ec2-app-a-no-public-ip.png)<br>[`08-ec2-app-b-no-public-ip.png`](../screenshots/08-session-manager/08-ec2-app-b-no-public-ip.png)<br>[`06-nacl-inbound-rules.png`](../screenshots/06-nacl/06-nacl-inbound-rules.png)<br>[`15-flowlog-reject-record.png`](../screenshots/15-flowlogs/15-flowlog-reject-record.png) |
 | **4** | Direct connection to RDS from external client | Amazon RDS MySQL (`depi-sec-db`) | Connection fails / timeout | PowerShell `Test-NetConnection` to port 3306 failed (`TcpTestSucceeded : False`) | **PASS** | [`11-rds-external-connection-failed.png`](../screenshots/11-rds/11-rds-external-connection-failed.png)<br>[`11-rds-private-access.png`](../screenshots/11-rds/11-rds-private-access.png) |
 | **5** | TCP connection to RDS from internal EC2 instance | Amazon RDS MySQL (`depi-sec-db`) | Port 3306 reachable | Bash `/dev/tcp` probe confirmed: `SUCCESS: RDS port 3306 is reachable` | **PASS (Network Reachability)** | [`11-rds-internal-connection.png`](../screenshots/11-rds/11-rds-internal-connection.png) |
 | **6** | Anonymous / public access to S3 test object | Amazon S3 (`depi-sec-app-*`) | Access denied / refused | Unauthenticated `curl -I` returned `HTTP/1.1 403 Forbidden`; explicit ACL mutation **not executed** | **PASS (Anonymous Read Refusal) / PARTIAL** | [`10-s3-public-access-refused.png`](../screenshots/10-s3/10-s3-public-access-refused.png)<br>[`10-app-bucket-public-access-block.png`](../screenshots/10-s3/10-app-bucket-public-access-block.png) |
@@ -64,21 +64,39 @@ Each test case details the operational procedure performed, the expected securit
 ---
 
 ### Test 3: Direct SSH Ingress Verification
-- **Objective:** Confirm whether the private EC2 instances have public IP addresses and whether the network ACL restricts inbound SSH traffic.
+- **Objective:** Confirm whether the private EC2 instances have public IP addresses, whether network security boundaries restrict inbound SSH traffic, and whether dropped packets generate `REJECT` records in VPC Flow Logs.
 - **Empirical Evidence & Observed Procedure:**
-  1. EC2 instance configuration was inspected in the AWS Management Console:
-     - Instance `depi-sec-app-a` (`i-0749711e008057ae1`): Public IPv4 address is empty (`-`). Private IP is `10.0.11.109`.
-     - Instance `depi-sec-app-b` (`i-0306fb121beae9963`): Public IPv4 address is empty (`-`). Private IP is `10.0.12.82`.
+  1. EC2 instance configuration was inspected in the AWS Management Console and CLI:
+     - Instance `depi-sec-app-a` (`i-0749711e008057ae1`): Public IPv4 address is empty (`-`). Private IP is `10.0.11.161`.
+     - Instance `depi-sec-app-b` (`i-0306fb121beae9963`): Public IPv4 address is empty (`-`). Private IP is `10.0.12.241`.
   2. Network ACL `depi-sec-private-nacl` configuration was inspected in the AWS Console:
-     - Inbound Rule 200 explicitly sets: Protocol: `TCP (6)`, Port range: `22`, Source: `0.0.0.0/0`, Allow/Deny: `DENY`.
-  3. *Execution Status Note:* An active `ssh` command-line connection attempt from an external client was **NOT EXECUTED** in the recorded evidence.
-- **Expected Outcome:** Instances cannot be reached via direct internet SSH due to absence of public IPs and explicit NACL drop.
-- **Actual Result:** Confirmed from console configurations that neither instance has a public IP address and that inbound port 22 is explicitly denied by the private NACL. Direct SSH execution remains unexecuted, and full Flow Log `REJECT` verification is pending Task 15.
-- **Status:** **PARTIAL**
+     - Inbound Rule 200 explicitly sets: Protocol: `TCP (6)`, Port range: `22`, Source: `0.0.0.0/0`, Allow/Deny: `DENY`. In addition, security group `depi-sec-app-sg` restricts ingress strictly to TCP port 80 from `depi-sec-alb-sg`.
+  3. VPC Flow Logs (`fl-01baa2f74df906054`) was enabled at the VPC level on `aws_vpc.app_vpc` (`vpc-0f7551daf8a303b6b`) with traffic type `ALL`, publishing to CloudWatch Log Group `/depi-sec/vpc/flowlogs`.
+  4. Flow log delivery status was verified as `SUCCESS`, with active `ACCEPT` records observed for legitimate application and endpoint communications.
+  5. A TCP connection attempt targeting destination TCP port 22 was initiated from `depi-sec-app-a` (`10.0.11.161`) toward `depi-sec-app-b` (`10.0.12.241`). The probe timed out with exit code `124`, confirming that SYN packets were dropped without establishing a TCP connection.
+  6. A CloudWatch Logs Insights query explicitly scoped to log group `/depi-sec/vpc/flowlogs` was executed to filter for TCP port 22 traffic:
+     ```text
+     fields @timestamp, @message
+     | parse @message "* * * * * * * * * * * * * *" as version, account, eni, srcaddr, dstaddr, srcport, dstport, protocol, packets, bytes, startTime, endTime, action, logStatus
+     | filter dstport = "22" and action = "REJECT"
+     | sort @timestamp desc
+     | limit 20
+     ```
+  7. The query returned four distinct `REJECT` records on destination port 22:
+     - Three external scanning attempts from public IPs (`46.109.171.236`, `193.163.125.173`) targeting port 22 on ALB public interfaces (`10.0.2.49`, `10.0.1.109`).
+     - One internal connection attempt originating from `depi-sec-app-a` (`10.0.11.161`) targeting `depi-sec-app-b` (`10.0.12.241`) on destination TCP port 22, matching the timed-out probe:
+       `2 882034443616 eni-0b401abe98593901c 10.0.11.161 10.0.12.241 58932 22 6 3 180 1792100814 1792100825 REJECT OK`
+  8. *Execution Status & Verification Scope:*
+     - **TCP Network Isolation vs. Interactive SSH Test:** This empirical test verifies Layer 4 TCP network isolation. Packets targeting port 22 are rejected at the network interface boundary. A full interactive SSH authentication test (negotiating cryptographic ciphers, validating host keys or SSH credentials, and opening an interactive shell) was neither attempted nor executed, as the host does not expose port 22 and administrative access is exclusively managed keylessly via AWS Systems Manager Session Manager.
+     - **Rule Attribution Boundary:** VPC Flow Logs record the packet drop decision (`action = "REJECT"`) at the ENI boundary. The evidence does not attribute the drop definitively to a specific NACL or Security Group: both the stateless Network ACL (`depi-sec-private-nacl` Inbound Rule 200 DENY 22) and the stateful Security Group (`depi-sec-app-sg`, which does not permit inbound port 22) enforce drops on this traffic.
+- **Expected Outcome:** Instances cannot be reached via direct internet SSH, and dropped connection attempts are recorded as `REJECT` entries in VPC Flow Logs.
+- **Actual Result:** Confirmed that neither instance has a public IP address, inbound TCP port 22 connection attempts time out with exit code 124, and CloudWatch Logs Insights verified four `REJECT` records on TCP port 22 (including source `10.0.11.161` targeting `10.0.12.241`).
+- **Status:** **PASS (Network Isolation & Flow Log REJECT Verified)**
 - **Screenshots:**
   - [`08-ec2-app-a-no-public-ip.png`](../screenshots/08-session-manager/08-ec2-app-a-no-public-ip.png) — AWS Console showing `depi-sec-app-a` with no public IPv4 address (`-`).
   - [`08-ec2-app-b-no-public-ip.png`](../screenshots/08-session-manager/08-ec2-app-b-no-public-ip.png) — AWS Console showing `depi-sec-app-b` with no public IPv4 address (`-`).
   - [`06-nacl-inbound-rules.png`](../screenshots/06-nacl/06-nacl-inbound-rules.png) — AWS Console showing `depi-sec-private-nacl` Inbound Rule 200 DENY TCP 22.
+  - [`15-flowlog-reject-record.png`](../screenshots/15-flowlogs/15-flowlog-reject-record.png) — CloudWatch Logs Insights showing `REJECT` records on destination port 22.
 
 ---
 
@@ -168,7 +186,7 @@ Each test case details the operational procedure performed, the expected securit
 
 ---
 
-## Pending Security Test Cases (Tasks 14–20)
+## Pending Security Test Cases (Tasks 16–20)
 
 The remaining test cases from Task 20 require components scheduled for subsequent project tasks:
 
