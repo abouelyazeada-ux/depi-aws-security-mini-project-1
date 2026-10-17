@@ -1,8 +1,8 @@
-# Security Testing & Verification Report — Tasks 1–17
+# Security Testing & Verification Report — Tasks 1–18
 
-This document records the empirical validation of the security controls implemented in **Tasks 1–17**, following the standardized test framework outlined in **Task 20** of `Project-1.pdf`.
+This document records the empirical validation of the security controls implemented in **Tasks 1–18**, following the standardized test framework outlined in **Task 20** of `Project-1.pdf`.
 
-Each test case details the operational procedure performed, the expected security outcome, the observed real-world behavior, and links to the supporting screenshot evidence. Tests are strictly documented based on confirmed evidence without assuming or inferring unexecuted steps. Tests associated with **Tasks 18–20** that require pending infrastructure are explicitly identified as **Pending Implementation**.
+Each test case details the operational procedure performed, the expected security outcome, the observed real-world behavior, and links to the supporting screenshot evidence. Tests are strictly documented based on confirmed evidence without assuming or inferring unexecuted steps. Tests associated with **Tasks 19–20** that require pending infrastructure are explicitly identified as **Pending Implementation**.
 
 ---
 
@@ -18,7 +18,7 @@ Each test case details the operational procedure performed, the expected securit
 | **6** | Anonymous / public access to S3 test object | Amazon S3 (`depi-sec-app-*`) | Access denied / refused | Unauthenticated `curl -I` returned `HTTP/1.1 403 Forbidden`; explicit ACL mutation **not executed** | **PASS (Anonymous Read Refusal) / PARTIAL** | [`10-s3-public-access-refused.png`](../screenshots/10-s3/10-s3-public-access-refused.png)<br>[`10-app-bucket-public-access-block.png`](../screenshots/10-s3/10-app-bucket-public-access-block.png) |
 | **7** | Add SSH rule (`0.0.0.0/0:22`) to App SG | Security Auto-Remediation (Lambda & EventBridge) | Rogue rule removed by Lambda; HTTP port 80 preserved; CloudWatch log and SNS email received | Port 22 from `0.0.0.0/0` manually authorized on `depi-sec-app-sg`; EventBridge event triggered Lambda; CloudWatch logs confirmed `REMEDIATION_TRIGGERED`, `REMEDIATION_SUCCESS`, and `SNS_ALERT_PUBLISHED`; rule revoked; original HTTP port 80 rule remained intact; real SNS email alert received | **PASS (Automated Remediation Verified; Before Screenshot Omitted)** | [`17-b-rule-removed.png`](../screenshots/17-lambda/17-b-rule-removed.png)<br>[`17-c-lambda-log.png`](../screenshots/17-lambda/17-c-lambda-log.png)<br>[`17-d-sns-email.png`](../screenshots/17-lambda/17-d-sns-email.png) |
 | **8** | Stop Nginx web service on one instance | ALB Target Group (`depi-sec-tg`) & CloudWatch Alarms | Target marked Unhealthy; traffic routes to healthy target; CloudWatch alarm fires; alert email sent | `app-a` marked Unhealthy in console; traffic served by `app-b`; CloudWatch alarm `depi-sec-alb-unhealthy-hosts` transitioned to `ALARM`; real SNS alert email received; `depi-sec-overview` dashboard captured spike to 1 and recovery to 0; returned to Healthy | **PASS** | [`12-alb-unhealthy-target.png`](../screenshots/12-alb/12-alb-unhealthy-target.png)<br>[`12-alb-failover-working.png`](../screenshots/12-alb/12-alb-failover-working.png)<br>[`12-alb-recovered.png`](../screenshots/12-alb/12-alb-recovered.png)<br>[`16-alarm-unhealthy-hosts.png`](../screenshots/16-cloudwatch/16-alarm-unhealthy-hosts.png)<br>[`16-alarm-email-notification.png`](../screenshots/16-cloudwatch/16-alarm-email-notification.png)<br>[`16-dashboard-overview.png`](../screenshots/16-cloudwatch/16-dashboard-overview.png) |
-| **9** | Curl app server from peering tools VPC | VPC Peering Connection | HTTP 200 via private route | *Pending Task 18 Peering deployment* | **PENDING** | *Awaiting Task 18* |
+| **9** | Curl app server from peering tools VPC | VPC Peering Connection (`pcx-066a78d3ee36e18f9`) | HTTP 200 via private route | Executed `curl -s -o /dev/null -w "%{http_code}" http://10.0.11.161` from Tools EC2 (`i-039ddfc570cb61341`); returned HTTP 200 OK over private route via active peering connection; direct external ALB access returned HTTP 403 Forbidden | **PASS** | [`18-peering-active.png`](../screenshots/18-peering/18-peering-active.png)<br>[`18-app-route-table.png`](../screenshots/18-peering/18-app-route-table.png)<br>[`18-tools-route-table.png`](../screenshots/18-peering/18-tools-route-table.png)<br>[`18-peering-curl-success.png`](../screenshots/18-peering/18-peering-curl-success.png) |
 | **10** | Delete recovery point in locked backup vault | AWS Backup Vault Lock | Access Denied by Vault Lock | *Pending Task 19 Backup deployment* | **PENDING** | *Awaiting Task 19* |
 
 ---
@@ -239,14 +239,43 @@ Each test case details the operational procedure performed, the expected securit
 
 ---
 
-## Pending Security Test Cases (Tasks 18–20)
+### Test 9: Inter-VPC Private Communication via Peering (Task 18)
+- **Objective:** Verify private, bidirectional network routing and security group / NACL policy enforcement between Tools VPC (`10.1.0.0/16`) and App VPC (`10.0.0.0/16`) across same-account VPC Peering connection `pcx-066a78d3ee36e18f9` without crossing the public internet.
+- **Empirical Evidence & Observed Procedure:**
+  1. VPC Peering connection `depi-sec-app-tools-peering` (`pcx-066a78d3ee36e18f9`) was verified in the AWS Management Console with Status: `Active`, Requester: `depi-sec-app-vpc` (`10.0.0.0/16`), Accepter: `depi-sec-tools-vpc` (`10.1.0.0/16`).
+  2. App private route table `depi-sec-private-rt` was inspected: route `10.1.0.0/16` targets `pcx-066a78d3ee36e18f9` with status `Active`.
+  3. Tools route table `depi-sec-tools-rt` was inspected: route `10.0.0.0/16` targets `pcx-066a78d3ee36e18f9` with status `Active`.
+  4. EC2 instance `depi-sec-tools-instance` (`i-039ddfc570cb61341`) was deployed in subnet `depi-sec-tools-a` (`10.1.1.0/24`) without a public IP address. AWS Systems Manager Session Manager verified connection status as `Online` via shared SSM Interface Endpoints in the App VPC.
+  5. Initiated HTTP request from Tools instance (`10.1.1.0/24`) to App instance `depi-sec-app-a` private IP (`10.0.11.161`):
+     ```bash
+     curl -s -o /dev/null -w "%{http_code}" http://10.0.11.161
+     ```
+     The command returned HTTP status code `200` OK, confirming end-to-end packet flow across VPC peering, stateful SG evaluation, and stateless NACL evaluation.
+  6. Initiated ICMP echo request from Tools instance to App instance using the exact verified command:
+     ```bash
+     ping -c 3 -W 3 10.0.11.161
+     ```
+     Result: 3 packets transmitted, 3 received, 0% packet loss, average RTT 0.225 ms.
+  7. Executed direct external probe against the public ALB DNS without the custom CloudFront verification header:
+     ```bash
+     curl -s -o /dev/null -w "%{http_code}" http://depi-sec-alb-1246520704.us-east-1.elb.amazonaws.com
+     ```
+     The request returned HTTP status code `403` Forbidden, confirming perimeter origin header enforcement remains active and isolated from inter-VPC traffic.
+- **Expected Outcome:** Tools instance connects privately to App instance returning HTTP 200 over VPC peering; direct external ALB access returns HTTP 403.
+- **Actual Result:** Tools instance reached `10.0.11.161` with HTTP 200 OK and 0% ICMP packet loss; external ALB access returned HTTP 403 Forbidden.
+- **Status:** **PASS**
+- **Screenshots:**
+  - [`18-peering-active.png`](../screenshots/18-peering/18-peering-active.png) — VPC Peering console showing `depi-sec-app-tools-peering` (`pcx-066a78d3ee36e18f9`) in `Active` status.
+  - [`18-app-route-table.png`](../screenshots/18-peering/18-app-route-table.png) — Route table console showing `depi-sec-private-rt` with active route `10.1.0.0/16` targeting `pcx-066a78d3ee36e18f9`.
+  - [`18-tools-route-table.png`](../screenshots/18-peering/18-tools-route-table.png) — Route table console showing `depi-sec-tools-rt` with active route `10.0.0.0/16` targeting `pcx-066a78d3ee36e18f9`.
+  - [`18-peering-curl-success.png`](../screenshots/18-peering/18-peering-curl-success.png) — Terminal output showing HTTP 200 OK response from `10.0.11.161` and successful ICMP ping via peering.
 
-The remaining test cases from Task 20 require components scheduled for subsequent project tasks:
+---
 
-- **Test 9: Inter-VPC Private Communication via Peering (Task 18)**
-  - *Procedure:* From an administrative instance in the Tools VPC, curl the private IP of an application server across the peering connection.
-  - *Expected Result:* HTTP 200 returned over private route without transit across the public internet.
-  - *Status:* **Pending Task 18 implementation.**
+## Pending Security Test Cases (Tasks 19–20)
+
+The remaining test case from Task 20 requires components scheduled for subsequent project tasks:
+
 - **Test 10: AWS Backup Vault Lock Immutability (Task 19)**
   - *Procedure:* Attempt to delete a backup recovery point inside the locked vault using root/admin credentials.
   - *Expected Result:* AWS Backup rejects the deletion with `AccessDeniedException` due to Vault Lock policy.

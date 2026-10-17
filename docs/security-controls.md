@@ -1,12 +1,12 @@
 # Security Controls Matrix — Secure AWS Web Platform
 
-This document serves as the primary security compliance audit reference for the platform. It details each security control implemented across **Tasks 1–17**, identifying the governing AWS service, the threat or attack vector mitigated, the implementation mechanism in Terraform, and the verifying screenshot evidence.
+This document serves as the primary security compliance audit reference for the platform. It details each security control implemented across **Tasks 1–18**, identifying the governing AWS service, the threat or attack vector mitigated, the implementation mechanism in Terraform, and the verifying screenshot evidence.
 
-Unimplemented controls scheduled for **Tasks 18–20** are clearly designated as **Pending Implementation** at the conclusion of this document.
+Unimplemented controls scheduled for **Tasks 19–20** are clearly designated as **Pending Implementation** at the conclusion of this document.
 
 ---
 
-## 1. Security Controls Master Table (Tasks 1–17)
+## 1. Security Controls Master Table (Tasks 1–18)
 
 | Control ID | Security Control | AWS Service | Threat Mitigated | Terraform Implementation | Verifying Screenshot | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -15,8 +15,8 @@ Unimplemented controls scheduled for **Tasks 18–20** are clearly designated as
 | **SEC-03** | **Least Privilege EC2 Instance Profile** | AWS IAM | Lateral movement and unauthorized data exfiltration if an application server is compromised. | `aws_iam_role.ec2_role` scoped strictly to `AmazonSSMManagedInstanceCore` and customer-managed policy `depi-sec-s3-app-read` granting `s3:GetObject` only to `arn:aws:s3:::depi-sec-app-*/*`. No IAM credentials stored on EC2. | [`03-iam-role-trust.png`](../screenshots/03-iam/03-iam-role-trust.png)<br>[`03-iam-s3-policy-json.png`](../screenshots/03-iam/03-iam-s3-policy-json.png) | **Verified** |
 | **SEC-04** | **VPC Network Isolation & Zero Public IPs** | Amazon VPC | Direct internet-based port scanning, reconnaissance, and unauthorized remote access. | Private subnets `depi-sec-private-a` (`10.0.11.0/24`) and `depi-sec-private-b` (`10.0.12.0/24`) configured with `map_public_ip_on_launch = false`. Route table has no route to Internet Gateway. | [`04-vpc-resource-map.png`](../screenshots/04-vpc/04-vpc-resource-map.png)<br>[`04-public-route-table.png`](../screenshots/04-vpc/04-public-route-table.png)<br>[`04-private-route-table.png`](../screenshots/04-vpc/04-private-route-table.png) | **Verified** |
 | **SEC-05** | **Tiered Security Group Chaining (SG-as-Source)** | Amazon EC2 / VPC | Lateral network pivoting; bypass of application load balancer; direct access to database or storage. | Strict ingress chaining: `depi-sec-app-sg` permits port 80 only from `depi-sec-alb-sg`; `depi-sec-db-sg` permits port 3306 only from `depi-sec-app-sg`; `depi-sec-efs-sg` permits port 2049 only from `depi-sec-app-sg`. | [`05-alb-sg-public-http.png`](../screenshots/05-security/05-alb-sg-public-http.png)<br>[`05-app-sg-source.png`](../screenshots/05-security/05-app-sg-source.png)<br>[`05-db-sg-source.png`](../screenshots/05-security/05-db-sg-source.png)<br>[`05-efs-sg-source.png`](../screenshots/05-security/05-efs-sg-source.png) | **Verified** |
-| **SEC-06** | **Stateless Subnet Boundary Defense (NACL)** | Amazon VPC | Unauthorized protocols, SSH brute-forcing at the network packet boundary. | `depi-sec-private-nacl` attached to private subnets with Rule 200 explicitly denying inbound TCP port 22 from `0.0.0.0/0`, and tightly restricting ingress to VPC CIDR (`10.0.0.0/16`). | [`06-nacl-inbound-rules.png`](../screenshots/06-nacl/06-nacl-inbound-rules.png)<br>[`06-nacl-outbound-rules.png`](../screenshots/06-nacl/06-nacl-outbound-rules.png)<br>[`06-nacl-subnet-associations.png`](../screenshots/06-nacl/06-nacl-subnet-associations.png) | **Verified** |
-| **SEC-07** | **Private AWS Service Connectivity via VPC Endpoints** | AWS PrivateLink | Data leakage over public internet; dependency on NAT gateways or public internet routes for AWS APIs. | S3 Gateway Endpoint (`com.amazonaws.us-east-1.s3`) on private route table; Interface Endpoints for `ssm`, `ssmmessages`, and `ec2messages` in both private subnets with `depi-sec-endpoint-sg` restricting port 443 to `10.0.0.0/16`. | [`07-endpoints-available.png`](../screenshots/07-endpoint/07-endpoints-available.png)<br>[`07-s3-gateway-route-cli.png`](../screenshots/07-endpoint/07-s3-gateway-route-cli.png)<br>[`07-s3-gateway-route-console.png`](../screenshots/07-endpoint/07-s3-gateway-route-console.png) | **Verified** |
+| **SEC-06** | **Stateless Subnet Boundary Defense (NACL)** | Amazon VPC | Unauthorized protocols, SSH brute-forcing at the network packet boundary. | `depi-sec-private-nacl` attached to private subnets with Rule 200 explicitly denying inbound TCP port 22 from `0.0.0.0/0`, and tightly restricting ingress to VPC CIDR (`10.0.0.0/16`). Rules 150–152 and 150–151 permit inter-VPC traffic from Tools subnet `10.1.1.0/24`. | [`06-nacl-inbound-rules.png`](../screenshots/06-nacl/06-nacl-inbound-rules.png)<br>[`06-nacl-outbound-rules.png`](../screenshots/06-nacl/06-nacl-outbound-rules.png)<br>[`06-nacl-subnet-associations.png`](../screenshots/06-nacl/06-nacl-subnet-associations.png) | **Verified** |
+| **SEC-07** | **Private AWS Service Connectivity via VPC Endpoints** | AWS PrivateLink | Data leakage over public internet; dependency on NAT gateways or public internet routes for AWS APIs. | S3 Gateway Endpoint (`com.amazonaws.us-east-1.s3`) on private route table; Interface Endpoints for `ssm`, `ssmmessages`, and `ec2messages` in both private subnets with `depi-sec-endpoint-sg` restricting port 443 to `10.0.0.0/16` and Tools subnet `10.1.1.0/24`. | [`07-endpoints-available.png`](../screenshots/07-endpoint/07-endpoints-available.png)<br>[`07-s3-gateway-route-cli.png`](../screenshots/07-endpoint/07-s3-gateway-route-cli.png)<br>[`07-s3-gateway-route-console.png`](../screenshots/07-endpoint/07-s3-gateway-route-console.png) | **Verified** |
 | **SEC-08** | **Bastionless & Keyless Systems Management** | AWS Systems Manager & EC2 | Stolen SSH private keys, compromised bastion hosts, unauthorized interactive shell access. | Zero SSH key pairs generated. Zero open port 22 rules in security groups. EC2 instances managed exclusively via AWS Systems Manager Session Manager using IAM role credentials. Verified instances have no public IPs (`-`). *Note: Active SSH connection attempt was not executed.* | [`08-session-manager-app-a.png`](../screenshots/08-session-manager/08-session-manager-app-a.png)<br>[`08-session-manager-app-b.png`](../screenshots/08-session-manager/08-session-manager-app-b.png)<br>[`08-ec2-app-a-no-public-ip.png`](../screenshots/08-session-manager/08-ec2-app-a-no-public-ip.png)<br>[`08-ec2-app-b-no-public-ip.png`](../screenshots/08-session-manager/08-ec2-app-b-no-public-ip.png) | **Verified (Config & Session)** |
 | **SEC-09** | **Cryptographic Storage Protection at Rest** | Amazon EBS & Amazon EFS | Physical disk theft, unauthorized data inspection from raw block/file storage snapshots. | EC2 root volumes use `root_block_device { encrypted = true, volume_type = "gp3" }`. `aws_efs_file_system` configured with `encrypted = true`. EFS Access Point enforces POSIX identity `uid=1000, gid=1000`. | [`09-ebs-encrypted-gp3.png`](../screenshots/09-efs/09-ebs-encrypted-gp3.png)<br>[`09-efs-mount-targets.png`](../screenshots/09-efs/09-efs-mount-targets.png)<br>[`09-efs-shared-file.png`](../screenshots/09-efs/09-efs-shared-file.png) | **Verified** |
 | **SEC-10** | **Multi-Layer S3 Object & Data Security** | Amazon S3 | Accidental data leak, public data scraping, data tampering, ransomware, unencrypted transit. | App and Logs buckets enforce: (1) S3 Block Public Access (all 4 flags `true`), (2) Default `AES256` SSE, (3) Object Versioning `Enabled`, (4) Bucket policy denying non-HTTPS traffic (`aws:SecureTransport = false`), (5) 30d Glacier transition and 365d expiration lifecycle rules. Unauthenticated anonymous read of test object returned `HTTP/1.1 403 Forbidden`. *Note: Explicit public ACL mutation was not executed.* | [`10-app-bucket-public-access-block.png`](../screenshots/10-s3/10-app-bucket-public-access-block.png)<br>[`10-app-bucket-versioning-encryption.png`](../screenshots/10-s3/10-app-bucket-versioning-encryption.png)<br>[`10-app-bucket-lifecycle.png`](../screenshots/10-s3/10-app-bucket-lifecycle.png)<br>[`10-logs-bucket-public-access-block.png`](../screenshots/10-s3/10-logs-bucket-public-access-block.png)<br>[`10-logs-bucket-versioning-encryption.png`](../screenshots/10-s3/10-logs-bucket-versioning-encryption.png)<br>[`10-logs-bucket-lifecycle.png`](../screenshots/10-s3/10-logs-bucket-lifecycle.png)<br>[`10-s3-public-access-refused.png`](../screenshots/10-s3/10-s3-public-access-refused.png) | **Verified (Anonymous Refusal)** |
@@ -27,6 +27,7 @@ Unimplemented controls scheduled for **Tasks 18–20** are clearly designated as
 | **SEC-15** | **VPC Flow Logs & Network Traffic Auditing** | Amazon VPC & CloudWatch Logs | Undetected lateral network movement, unauthorized port scanning, data exfiltration, covert channel communication. | `aws_flow_log.app_vpc_flow_log` (`fl-01baa2f74df906054`) attached to `aws_vpc.app_vpc` (`vpc-0f7551daf8a303b6b`) for `traffic_type = "ALL"`, publishing to `/depi-sec/vpc/flowlogs` (14-day retention) via least-privilege role `depi-sec-vpc-flow-logs-role`. Ingested `ACCEPT` records and 4 `REJECT` records on destination TCP port 22 verified via CloudWatch Logs Insights (including internal source `10.0.11.161` to `10.0.12.241`). | [`15-flowlog-reject-record.png`](../screenshots/15-flowlogs/15-flowlog-reject-record.png) | **Verified** |
 | **SEC-16** | **CloudWatch Alarms, Security Metric Filtering & Proactive Alerting** | Amazon CloudWatch & Amazon SNS | Delayed incident detection for compute CPU exhaustion, target health failure, database storage starvation, and brute-force console login attempts. | 5 CloudWatch metric alarms deployed: (1) `depi-sec-ec2-cpu-high-app-a` (>70%), (2) `depi-sec-ec2-cpu-high-app-b` (>70%), (3) `depi-sec-alb-unhealthy-hosts` (>0), (4) `depi-sec-rds-free-storage-low` (<2 GB), (5) `depi-sec-failed-console-logins-alarm` (>=3 in 5m via CloudTrail metric filter `{ ($.eventName = "ConsoleLogin") && ($.errorMessage = "Failed authentication") }`). Alerts delivered to `depi-sec-alerts` SNS topic. ALB alarm transition (`OK -> ALARM`), real email alert delivery, and recovery (`ALARM -> OK`) verified during Nginx test. Operational dashboard `depi-sec-overview` visualizes live metrics. | [`16-dashboard-overview.png`](../screenshots/16-cloudwatch/16-dashboard-overview.png)<br>[`16-alarm-unhealthy-hosts.png`](../screenshots/16-cloudwatch/16-alarm-unhealthy-hosts.png)<br>[`16-alarm-email-notification.png`](../screenshots/16-cloudwatch/16-alarm-email-notification.png) | **Verified** |
 | **SEC-17** | **Event-Driven Security Auto-Remediation** | AWS Lambda, EventBridge, CloudTrail & SNS | Rogue or accidental security group modification exposing sensitive ports (TCP 22 SSH, TCP 3389 RDP) to the public internet (`0.0.0.0/0`); zero-day exposure windows. | EventBridge rule `depi-sec-remediate-open-ssh` triggers on CloudTrail `AuthorizeSecurityGroupIngress`. Python 3.12 Lambda `depi-sec-auto-remediation` assumed by least-privilege role `depi-sec-lambda-remediation-role` (strictly scoped to `ec2:DescribeSecurityGroups`, `ec2:RevokeSecurityGroupIngress` on `depi-sec-app-sg`, and `sns:Publish` on `depi-sec-alerts`). Validates event, verifies `TARGET_SECURITY_GROUP_ID`, revokes only `0.0.0.0/0` (preserving port 80 from ALB SG and internal CIDRs), handles duplicate/conflict events via active rule re-inspection, logs structured telemetry, and dispatches incident alert email. | [`17-b-rule-removed.png`](../screenshots/17-lambda/17-b-rule-removed.png)<br>[`17-c-lambda-log.png`](../screenshots/17-lambda/17-c-lambda-log.png)<br>[`17-d-sns-email.png`](../screenshots/17-lambda/17-d-sns-email.png)<br>*(Note: `17-a-rule-added.png` omitted; rule remediated live before manual capture)* | **Verified** |
+| **SEC-18** | **Isolated Management Network (VPC Peering)** | AWS VPC Peering & Amazon EC2 | Direct public access for operations; unsegmented administrative tools; unauthorized ingress to application tier. | `depi-sec-tools-vpc` (`10.1.0.0/16`) connected via same-account VPC peering `pcx-066a78d3ee36e18f9`. Private route tables route inter-VPC traffic. `depi-sec-tools-sg` enforces discrete egress (TCP 80, TCP 443, ICMP to `10.0.11.0/24` & `10.0.12.0/24`). `depi-sec-private-nacl` enforces stateless rules 150–152 (inbound) and 150–151 (outbound ephemeral/ICMP reply). Keyless SSM management shares App VPC interface endpoints. | [`18-peering-active.png`](../screenshots/18-peering/18-peering-active.png)<br>[`18-app-route-table.png`](../screenshots/18-peering/18-app-route-table.png)<br>[`18-tools-route-table.png`](../screenshots/18-peering/18-tools-route-table.png)<br>[`18-peering-curl-success.png`](../screenshots/18-peering/18-peering-curl-success.png) | **Verified** |
 
 ---
 
@@ -158,12 +159,60 @@ The Lambda execution role (`depi-sec-lambda-remediation-role`) adheres strictly 
 
 ---
 
-## 6. Pending Security Controls (Tasks 18–20)
+## 6. In-Depth Analysis: Isolated Management Network & VPC Peering (Task 18)
+
+As part of Task 18, enterprise-grade network segmentation and out-of-band management isolation are established by connecting an isolated Tools VPC to the primary Application VPC via a secure VPC Peering connection.
+
+### 6.1. Network Segmentation & VPC Peering Architecture
+- **Isolated Tools VPC:** `aws_vpc.tools_vpc` (`depi-sec-tools-vpc`, CIDR `10.1.0.0/16`) deployed in `us-east-1` with DNS support and DNS hostnames enabled. Completely non-overlapping with the App VPC CIDR (`10.0.0.0/16`).
+- **Private Subnet Isolation:** Subnet `depi-sec-tools-a` (`10.1.1.0/24`) in AZ `us-east-1a` is configured with `map_public_ip_on_launch = false`. The VPC contains no Internet Gateway, NAT Gateway, or public subnets, eliminating external attack vectors.
+- **Same-Account VPC Peering:** `aws_vpc_peering_connection.peering` (`depi-sec-app-tools-peering`, `pcx-066a78d3ee36e18f9`) connects `aws_vpc.app_vpc` (requester) and `aws_vpc.tools_vpc` (accepter) with `auto_accept = true`.
+- **Non-Transitive Network Boundary:** AWS VPC Peering is strictly non-transitive. The Tools VPC cannot be leveraged as a transit path to any external networks or subsequent peerings, preserving absolute isolation.
+
+### 6.2. Bidirectional Route Table Configuration
+Routing between the two VPCs is strictly restricted to private route tables:
+- **App Private Route Table (`depi-sec-private-rt`):** Routes `10.1.0.0/16` via VPC Peering connection `pcx-066a78d3ee36e18f9` with status `Active`.
+- **Tools Private Route Table (`depi-sec-tools-rt`):** Routes `10.0.0.0/16` via VPC Peering connection `pcx-066a78d3ee36e18f9` with status `Active`. Associated strictly with subnet `depi-sec-tools-a`.
+- **Public Subnet Exclusion:** The App VPC public route table contains no routes to `10.1.0.0/16`, ensuring that external edge components cannot reach the management tier.
+
+### 6.3. Discrete Least-Privilege Security Group Egress
+Security group `depi-sec-tools-sg` implements discrete, least-privilege egress rules instead of broad VPC-wide CIDR permissions:
+- **Egress to App Private Subnets:**
+  - TCP port 80 (HTTP) to `10.0.11.0/24` (`depi-sec-private-a`) and `10.0.12.0/24` (`depi-sec-private-b`).
+  - ICMP Echo (ping) to `10.0.11.0/24` and `10.0.12.0/24`.
+- **Egress to SSM Interface Endpoints:**
+  - TCP port 443 (HTTPS) to `10.0.11.0/24` and `10.0.12.0/24`.
+- **Zero Internet Egress:** No `0.0.0.0/0` outbound rule exists; outbound connectivity is restricted entirely to the peering interface.
+- **Inbound Permissions on Target Security Groups:**
+  - `depi-sec-app-sg`: Permits inbound TCP port 80 and ICMP strictly from Tools subnet CIDR `10.1.1.0/24`.
+  - `depi-sec-endpoint-sg`: Permits inbound TCP port 443 strictly from Tools subnet CIDR `10.1.1.0/24`.
+
+### 6.4. Stateless Subnet Boundary Defense (Network ACL Rules)
+Because Network ACLs are stateless, return traffic must be explicitly accounted for in both directions. In Network ACL `depi-sec-private-nacl` attached to the App VPC private subnets:
+- **Inbound Rules:**
+  - Rule 150: Allow TCP port 80 from `10.1.1.0/24` (App web service ingress).
+  - Rule 151: Allow ICMP type -1 code -1 from `10.1.1.0/24` (Diagnostic ping ingress).
+  - Rule 152: Allow TCP port 443 from `10.1.1.0/24` (SSM Interface Endpoint ingress).
+- **Outbound Rules:**
+  - Rule 150: Allow TCP ports 1024–65535 to `10.1.1.0/24` (Ephemeral return packets for HTTP and HTTPS sessions).
+  - Rule 151: Allow ICMP type -1 code -1 to `10.1.1.0/24` (ICMP Echo Reply return packets).
+
+This ensures that administrative traffic from the Tools VPC is permitted at the network perimeter without opening broad IP blocks or compromising existing Rule 200 (deny public SSH).
+
+### 6.5. Keyless SSM Management via Shared Interface Endpoints
+The Tools EC2 instance (`depi-sec-tools-instance`, `i-039ddfc570cb61341`) is managed keylessly without SSH keys, public IPs, or internet access:
+- **IAM Instance Profile:** Reuses `depi-sec-ec2-instance-profile` with `AmazonSSMManagedInstanceCore`.
+- **Cross-Peering Endpoint Sharing:** Rather than provisioning dedicated VPC Interface Endpoints in the Tools VPC (which would incur an extra $21.60/month across 3 endpoints), the Tools instance connects to the existing SSM interface endpoints in the App VPC across VPC Peering.
+- **Dynamic User Data Configuration:** The EC2 `user_data` script dynamically resolves the endpoint private DNS names (`aws_vpc_endpoint.*.dns_entry[0].dns_name`), adds hostname overrides in `/etc/hosts` for `ssm.us-east-1.amazonaws.com`, `ssmmessages.us-east-1.amazonaws.com`, and `ec2messages.us-east-1.amazonaws.com`, and restarts the `amazon-ssm-agent`.
+- **Operational Verification:** SSM connection status confirmed as `Online`, allowing secure interactive terminal access exclusively via AWS Systems Manager Session Manager.
+
+---
+
+## 7. Pending Security Controls (Tasks 19–20)
 
 The following controls represent outstanding project tasks that have not yet been implemented or deployed in Terraform:
 
 | Task | Control | Planned AWS Service | Planned Threat Mitigation | Current Status |
 | :--- | :--- | :--- | :--- | :--- |
-| **Task 18** | **Isolated Management Network (VPC Peering)** | AWS VPC Peering | Direct public access for operations; unsegmented administrative tools. | *Pending implementation in `peering.tf`* |
 | **Task 19** | **Immutable Ransomware-Resistant Backups** | AWS Backup (Vault Lock) | Ransomware deletion of snapshots, accidental administrator destruction of backups. | *Pending implementation in `backup.tf`* |
-| **Task 20** | **End-to-End Security Audit & Clean Destroy** | Terraform CLI & AWS Console | Unmonitored lingering infrastructure, resource leakage, cost overruns. | *Pending final execution after Tasks 18–19* |
+| **Task 20** | **End-to-End Security Audit & Clean Destroy** | Terraform CLI & AWS Console | Unmonitored lingering infrastructure, resource leakage, cost overruns. | *Pending final execution after Task 19* |

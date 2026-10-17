@@ -1,6 +1,6 @@
 # Cloud Infrastructure Architecture — Secure AWS Web Platform
 
-This document provides a comprehensive technical breakdown of the multi-tier, multi-AZ cloud architecture implemented for DEPI Mini Project 1. It details the network topology, routing architecture, component placement rationale, data flows, and security boundaries across **Tasks 1–17**.
+This document provides a comprehensive technical breakdown of the multi-tier, multi-AZ cloud architecture implemented for DEPI Mini Project 1. It details the network topology, routing architecture, component placement rationale, data flows, and security boundaries across **Tasks 1–18**.
 
 ---
 
@@ -18,6 +18,7 @@ The platform is designed around the core security principles of **Defense in Dep
 - **VPC-Level Network Traffic Auditing:** A VPC Flow Log (`fl-01baa2f74df906054`, status `ACTIVE`, delivery `SUCCESS`) attached to the root of `depi-sec-app-vpc` (`vpc-0f7551daf8a303b6b`) captures IP traffic across all network interfaces (public ALB, private EC2, RDS, EFS, and endpoints) for traffic type `ALL`, publishing to Amazon CloudWatch Logs (`/depi-sec/vpc/flowlogs`) with 14-day retention via dedicated IAM role `depi-sec-vpc-flow-logs-role`.
 - **Proactive Platform Observability:** Amazon CloudWatch Metric Alarms, CloudTrail security metric filters, and an operations dashboard (`depi-sec-overview`) monitor infrastructure availability and security anomalies, integrated with Amazon SNS (`depi-sec-alerts`) for real-time alerting.
 - **Event-Driven Security Auto-Remediation:** Automated response via Amazon EventBridge and AWS Lambda (`depi-sec-auto-remediation`) listening to CloudTrail management events on `aws.ec2`. If an inbound rule exposes TCP port 22 or 3389 to `0.0.0.0/0` on `depi-sec-app-sg`, Lambda automatically revokes the offending public CIDR while preserving legitimate internal rules, logging structured events to CloudWatch Logs (`/aws/lambda/depi-sec-auto-remediation`) and dispatching an incident notification to Amazon SNS (`depi-sec-alerts`).
+- **Administrative Network Isolation & VPC Peering:** An isolated administrative network (`depi-sec-tools-vpc`, `10.1.0.0/16`) hosting an out-of-band monitoring server (`depi-sec-tools-instance`) connected to the application network via a dedicated, non-transitive VPC Peering connection (`pcx-066a78d3ee36e18f9`). Private communication is enforced through discrete security group egress rules and stateless Network ACL rules (`depi-sec-private-nacl`), enabling secure inter-VPC curl and ping diagnostics without public internet traversal.
 
 ---
 
@@ -310,6 +311,32 @@ The `depi-sec-private-nacl` is explicitly associated with private subnets (`depi
    - *CloudTrail Latency:* Management events typically reach EventBridge within 30 to 60 seconds of API execution. The auto-remediation workflow operates near-real-time rather than as an inline blocking control.
    - *Security Group Scope:* Least-privilege IAM permissions and function logic constrain remediation authority strictly to the designated application security group (`depi-sec-app-sg`).
 
+### 7.8. Isolated Management Network & VPC Peering Architecture (Task 18)
+1. **Management Plane Isolation & Topology:**
+   - In accordance with enterprise zero-trust networking, administrative and monitoring tooling is physically isolated into a separate Virtual Private Cloud (`depi-sec-tools-vpc`, CIDR `10.1.0.0/16`).
+   - The tools network provisions a dedicated private subnet (`depi-sec-tools-a`, CIDR `10.1.1.0/24`) in Availability Zone `us-east-1a` with `map_public_ip_on_launch = false`. The subnet contains no Internet Gateway and no public IP addresses.
+2. **Point-to-Point VPC Peering Architecture:**
+   - An intra-account, intra-region peering link (`pcx-066a78d3ee36e18f9`, `depi-sec-app-tools-peering`) connects `depi-sec-app-vpc` (`10.0.0.0/16`) directly to `depi-sec-tools-vpc` (`10.1.0.0/16`).
+   - The connection operates with `auto_accept = true` within the single owning AWS account (`882034443616`).
+   - **Non-Transitive Routing Security Boundary:** As highlighted in project specifications, VPC peering is non-transitive. Traffic cannot transit through `tools_vpc` to reach external networks, nor can external networks access `app_vpc` through `tools_vpc`.
+3. **Bidirectional Route Synchronization:**
+   - **App VPC Private Route Table (`depi-sec-private-rt`):** Routes destination CIDR `10.1.0.0/16` targeting peering connection `pcx-066a78d3ee36e18f9`.
+   - **Tools VPC Route Table (`depi-sec-tools-rt`):** Routes destination CIDR `10.0.0.0/16` targeting peering connection `pcx-066a78d3ee36e18f9`.
+4. **Least-Privilege Security Group Egress Controls:**
+   - Compute instance `depi-sec-tools-instance` (`i-039ddfc570cb61341`) attaches security group `depi-sec-tools-sg`.
+   - Egress rules strictly prohibit public internet access and are granularly scoped:
+     - TCP port 80 to `depi-sec-private-a` (`10.0.11.0/24`) and `depi-sec-private-b` (`10.0.12.0/24`).
+     - TCP port 443 to `depi-sec-private-a` (`10.0.11.0/24`) and `depi-sec-private-b` (`10.0.12.0/24`) (for shared SSM endpoints).
+     - ICMP ping (`-1/-1`) to `depi-sec-private-a` (`10.0.11.0/24`) and `depi-sec-private-b` (`10.0.12.0/24`).
+5. **Bidirectional Stateless Network ACL Enforcement (`depi-sec-private-nacl`):**
+   - Because `depi-sec-private-nacl` is stateless, least-privilege rules accommodate peering traffic explicitly:
+     - **Inbound Rules:** Rule 150 (TCP 80 from `10.1.1.0/24`), Rule 151 (ICMP from `10.1.1.0/24`), Rule 152 (TCP 443 from `10.1.1.0/24`).
+     - **Outbound Rules:** Rule 150 (TCP 1024–65535 to `10.1.1.0/24` for ephemeral socket replies), Rule 151 (ICMP to `10.1.1.0/24` for Echo Reply).
+6. **Zero-Cost SSM Endpoint Sharing via Dynamic Resolution:**
+   - Rather than provisioning three additional interface endpoints in `tools_vpc` (which would accrue ~$21.60/month in hourly endpoint fees), `depi-sec-tools-instance` reuses the existing PrivateLink endpoints in `app_vpc` across the peering connection.
+   - At launch, `user_data` dynamically resolves the private IP addresses of the SSM endpoints via their official AWS VPCE DNS names (`aws_vpc_endpoint.*.dns_entry[0].dns_name`), maps them to canonical hostnames (`ssm.us-east-1.amazonaws.com`, `ssmmessages`, `ec2messages`) in `/etc/hosts`, and restarts the SSM agent.
+   - Because canonical hostnames match the endpoint's public TLS certificate SAN, secure TLS validation succeeds natively without recurring endpoint charges.
+
 ---
 
 ## 8. Architectural Limitations & Security Boundary Analysis
@@ -348,3 +375,7 @@ As required by the project specifications, the architecture incorporates educati
 | **SNS Alert Topic (`depi-sec-alerts`)** | Regional (`us-east-1`) | Decoupled serverless notification service delivering real-time administrator alerts for infrastructure failures and security anomalies with strict least-privilege IAM policies. |
 | **Auto-Remediation Lambda (`depi-sec-auto-remediation`)** | Regional Serverless (`us-east-1`) | Event-driven Python 3.12 runtime with least-privilege IAM role executing near-real-time revocation of unauthorized public ingress rules without hosting infrastructure overhead. |
 | **EventBridge Rule (`depi-sec-remediate-open-ssh`)** | Regional Default Bus (`us-east-1`) | Decoupled event routing evaluating CloudTrail EC2 API calls and triggering remediation Lambda with minimal overhead. |
+| **Tools VPC (`depi-sec-tools-vpc`)** | Regional (`10.1.0.0/16`) | Provides network boundary isolation for administrative operations and monitoring, preventing co-mingling of operational tools with the production application VPC. |
+| **Tools Subnet (`depi-sec-tools-a`)** | Private (`10.1.1.0/24`, `us-east-1a`) | Hosts the monitoring instance without public IP assignment or internet gateway routes, enforcing zero-trust isolation. |
+| **VPC Peering (`pcx-066a78d3ee36e18f9`)** | Intra-Region (`us-east-1`) | Direct point-to-point private network link between Tools VPC and App VPC over private AWS fiber with zero data transfer fees within the same AZ (`us-east-1a`). |
+| **Tools Monitoring Instance (`depi-sec-tools-instance`)** | Private Subnet (`10.1.1.0/24`) | Out-of-band `t3.micro` monitoring instance (`i-039ddfc570cb61341`) managed via SSM, executing automated and interactive diagnostic verification of application health. |

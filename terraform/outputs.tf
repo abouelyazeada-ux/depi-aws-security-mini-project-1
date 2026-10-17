@@ -27,3 +27,23 @@ output "cloudfront_domain_name" {
   description = "Domain name of the CloudFront distribution"
   value       = aws_cloudfront_distribution.cf.domain_name
 }
+
+output "tools_vpc_id" {
+  description = "ID of the Tools VPC"
+  value       = aws_vpc.tools_vpc.id
+}
+
+output "peering_connection_id" {
+  description = "ID of the VPC peering connection between App VPC and Tools VPC"
+  value       = aws_vpc_peering_connection.peering.id
+}
+
+output "tools_instance_id" {
+  description = "Instance ID of the Tools monitoring EC2 instance"
+  value       = aws_instance.tools_instance.id
+}
+
+output "tools_instance_private_ip" {
+  description = "Private IP address of the Tools monitoring EC2 instance"
+  value       = aws_instance.tools_instance.private_ip
+}

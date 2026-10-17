@@ -4,7 +4,7 @@
 This project delivers an enterprise-grade, defense-in-depth web infrastructure on Amazon Web Services provisioned entirely as code using HashiCorp Terraform.
 The architecture enforces strict network isolation across two Availability Zones, hosting compute and database workloads in private subnets with zero public IP addresses.
 Public user traffic is accelerated and secured at the perimeter via an AWS CloudFront distribution configured with HTTPS viewer access and custom origin header verification.
-In-depth security controls include tiered security group chaining, stateless Network ACLs, AWS Systems Manager keyless administration, and S3 Block Public Access.
+In-depth security controls include tiered security group chaining, stateless Network ACLs, AWS Systems Manager keyless administration, S3 Block Public Access, and dedicated private management isolation via a non-transitive VPC Peering connection linking an isolated Tools VPC to the application tier.
 Centralized governance incorporates automated AWS Budgets cost alerts, Secrets Manager credential management, multi-region AWS CloudTrail auditing, CloudWatch Standard Logging v2, VPC Flow Logs network traffic capture, proactive CloudWatch metric alarms, a unified operations dashboard backed by Amazon SNS email alerts, and event-driven automated security remediation via Amazon EventBridge and AWS Lambda.
 
 ---
@@ -23,6 +23,12 @@ flowchart TB
             CF["AWS CloudFront Distribution\n(depi-sec-cloudfront)\nEnforces HTTPS | Caching | X-Origin-Verify"]
             Budget["AWS Budgets ($10 USD Alert)\n+ Automated IAM Deny Action"]
             Secrets["AWS Secrets Manager\n(depi-sec-db-credentials)"]
+        end
+
+        subgraph Tools_Network["Tools Network: depi-sec-tools-vpc (10.1.0.0/16)"]
+            Subnet_Tools["Private Tools Subnet: 10.1.1.0/24 (us-east-1a)\ndepi-sec-tools-a"]
+            Tools_EC2["Monitoring Server: depi-sec-tools-instance\nt3.micro | AL2023 | No Public IP\nSSM Managed | Encrypted gp3"]
+            Subnet_Tools --- Tools_EC2
         end
 
         subgraph VPC["Application VPC: depi-sec-app-vpc (10.0.0.0/16)"]
@@ -57,6 +63,9 @@ flowchart TB
             S3_App["App Data Bucket (depi-sec-app-*)\nVersioning + Glacier Lifecycle + PAB"]
             S3_Logs["Central Logs Bucket (depi-sec-logs-*)\nCloudFront Standard Logging v2 + PAB"]
         end
+
+        Peering["VPC Peering Connection: pcx-066a78d3ee36e18f9\n(depi-sec-app-tools-peering)\nNon-transitive private link"]
+        Tools_Network <===>|Private Peering Route| Peering <===>|Private Peering Route| VPC
     end
 
     %% Flow connections
@@ -67,6 +76,10 @@ flowchart TB
     CF -->|2. HTTP Request with X-Origin-Verify| ALB
     ALB -->|3. Forward to Target Group :80| EC2_A
     ALB -->|3. Forward to Target Group :80| EC2_B
+
+    Tools_EC2 ===>|Private HTTP :80 & ICMP via Peering| EC2_A
+    Tools_EC2 ===>|Private HTTP :80 & ICMP via Peering| EC2_B
+    Tools_EC2 -.->|HTTPS :443 via Peering Endpoint Sharing| VPCE
 
     EC2_A <-->|NFS TCP :2049 via depi-sec-efs-sg| EFS
     EC2_B <-->|NFS TCP :2049 via depi-sec-efs-sg| EFS
@@ -86,7 +99,9 @@ flowchart TB
 ### Architecture Description
 The architecture separates public ingress from backend processing and storage across two Availability Zones (`us-east-1a` and `us-east-1b`). Clients access the web application through **AWS CloudFront** over HTTPS, which injects a cryptographic custom header (`X-Origin-Verify`). The **Application Load Balancer (ALB)** in the public subnets checks for this header; direct access to the ALB without the header is blocked with a `403 Forbidden`.
 
-The application tier runs on private Amazon Linux 2023 EC2 instances (`depi-sec-app-a` and `depi-sec-app-b`) with **no public IPs**. Compute instances mount an encrypted **Amazon EFS** shared file system and query a private **Amazon RDS MySQL 8.0** instance. Direct management is handled out-of-band via **AWS Systems Manager Session Manager** through dedicated VPC Interface Endpoints, while S3 storage requests utilize a private **VPC Gateway Endpoint**, ensuring zero exposure to the public internet. Comprehensive auditing and observability are provided by multi-region **AWS CloudTrail** (auditing management actions and S3 data events into a centralized log bucket and CloudWatch Logs), VPC-level **VPC Flow Logs** (`depi-sec-vpc-flow-log`) capturing network IP traffic across every ENI, and proactive **Amazon CloudWatch Alarms** chained to **Amazon SNS** (`depi-sec-alerts`) with a consolidated operational dashboard (**depi-sec-overview**). Continuous automated response is enforced by **Amazon EventBridge** and **AWS Lambda** (`depi-sec-auto-remediation`): unauthorized ingress rules opening ports 22 or 3389 to `0.0.0.0/0` are detected via CloudTrail management events and automatically revoked in seconds under least-privilege IAM controls, accompanied by real-time Amazon SNS administrator email alerts.
+The application tier runs on private Amazon Linux 2023 EC2 instances (`depi-sec-app-a` and `depi-sec-app-b`) with **no public IPs**. Compute instances mount an encrypted **Amazon EFS** shared file system and query a private **Amazon RDS MySQL 8.0** instance. Direct management is handled out-of-band via **AWS Systems Manager Session Manager** through dedicated VPC Interface Endpoints, while S3 storage requests utilize a private **VPC Gateway Endpoint**, ensuring zero exposure to the public internet. Comprehensive auditing and observability are provided by multi-region **AWS CloudTrail** (auditing management actions and S3 data events into a centralized log bucket and CloudWatch Logs), VPC-level **VPC Flow Logs** (`depi-sec-vpc-flow-log`) capturing network IP traffic across every ENI, and proactive **Amazon CloudWatch Alarms** chained to **Amazon SNS** (`depi-sec-alerts`) with a consolidated operational dashboard (**depi-sec-overview**). Continuous automated response is enforced by **Amazon EventBridge** and **AWS Lambda** (`depi-sec-auto-remediation`), automatically revoking unauthorized public SSH ingress rules in near-real-time.
+
+Administrative isolation is enforced through a dedicated **Tools VPC** (`depi-sec-tools-vpc`, `10.1.0.0/16`) hosting a monitoring server (`depi-sec-tools-instance`, `i-039ddfc570cb61341`). This instance communicates privately with application instances over a dedicated, non-transitive **VPC Peering Connection** (`pcx-066a78d3ee36e18f9`). Cross-VPC traffic is restricted by least-privilege security group egress rules (strictly to private subnets A and B on ports 80, 443, and ICMP) and bidirectional stateless Network ACL rules (`depi-sec-private-nacl`), while dynamically resolving and reusing existing SSM interface endpoints over peering with zero additional recurring endpoint fees.
 
 ---
 
@@ -94,11 +109,13 @@ The application tier runs on private Amazon Linux 2023 EC2 instances (`depi-sec-
 
 | VPC / Subnet Name | Resource Identifier | CIDR Block | Availability Zone | Tier Type | Route Table | Routing Target |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **`depi-sec-app-vpc`** | `aws_vpc.app_vpc` | `10.0.0.0/16` | Multi-AZ | Parent VPC | N/A | Local routing |
-| **`depi-sec-public-a`** | `aws_subnet.public_a` | `10.0.1.0/24` | `us-east-1a` | Public | `depi-sec-public-rt` | `0.0.0.0/0` -> `depi-sec-igw` |
-| **`depi-sec-public-b`** | `aws_subnet.public_b` | `10.0.2.0/24` | `us-east-1b` | Public | `depi-sec-public-rt` | `0.0.0.0/0` -> `depi-sec-igw` |
-| **`depi-sec-private-a`** | `aws_subnet.private_a` | `10.0.11.0/24` | `us-east-1a` | Private | `depi-sec-private-rt` | `pl-63a5400a` -> `depi-sec-s3-endpoint` |
-| **`depi-sec-private-b`** | `aws_subnet.private_b` | `10.0.12.0/24` | `us-east-1b` | Private | `depi-sec-private-rt` | `pl-63a5400a` -> `depi-sec-s3-endpoint` |
+| **`depi-sec-app-vpc`** | `aws_vpc.app_vpc` | `10.0.0.0/16` | Multi-AZ | Parent Application VPC | N/A | Local routing |
+| **`depi-sec-public-a`** | `aws_subnet.public_a` | `10.0.1.0/24` | `us-east-1a` | Public Ingress | `depi-sec-public-rt` | `0.0.0.0/0` -> `depi-sec-igw` |
+| **`depi-sec-public-b`** | `aws_subnet.public_b` | `10.0.2.0/24` | `us-east-1b` | Public Ingress | `depi-sec-public-rt` | `0.0.0.0/0` -> `depi-sec-igw` |
+| **`depi-sec-private-a`** | `aws_subnet.private_a` | `10.0.11.0/24` | `us-east-1a` | Private App / Storage | `depi-sec-private-rt` | `pl-63a5400a` -> `depi-sec-s3-endpoint`<br>`10.1.0.0/16` -> `pcx-066a78d3ee36e18f9` |
+| **`depi-sec-private-b`** | `aws_subnet.private_b` | `10.0.12.0/24` | `us-east-1b` | Private App / Storage | `depi-sec-private-rt` | `pl-63a5400a` -> `depi-sec-s3-endpoint`<br>`10.1.0.0/16` -> `pcx-066a78d3ee36e18f9` |
+| **`depi-sec-tools-vpc`** | `aws_vpc.tools_vpc` | `10.1.0.0/16` | `us-east-1a` | Isolated Tools VPC | N/A | Local routing |
+| **`depi-sec-tools-a`** | `aws_subnet.tools_a` | `10.1.1.0/24` | `us-east-1a` | Private Monitoring | `depi-sec-tools-rt` | `10.0.0.0/16` -> `pcx-066a78d3ee36e18f9` |
 
 > Complete architectural routing explanations and subnet placement rationales are documented in [docs/architecture.md](docs/architecture.md).
 
@@ -124,6 +141,8 @@ The application tier runs on private Amazon Linux 2023 EC2 instances (`depi-sec-
 | **SEC-14** | Multi-Region Audit Logging (CloudTrail) | AWS CloudTrail | Undetected API modifications, administrative credential misuse, unauthorized security group or IAM changes | [14-cloudtrail-settings.png](screenshots/14-cloudtrail/14-cloudtrail-settings.png) | **Verified** |
 | **SEC-15** | VPC Flow Logs Network Traffic Auditing | Amazon VPC / CloudWatch Logs | Undetected lateral network movement, unauthorized port scanning, data exfiltration, covert channel communication | [15-flowlog-reject-record.png](screenshots/15-flowlogs/15-flowlog-reject-record.png) | **Verified** |
 | **SEC-16** | CloudWatch Metric Alarms & Dashboard | Amazon CloudWatch / SNS | Delayed incident awareness for failing targets, resource starvation, or brute-force console login attempts | [16-dashboard-overview.png](screenshots/16-cloudwatch/16-dashboard-overview.png) | **Verified** |
+| **SEC-17** | Event-Driven Security Auto-Remediation | AWS Lambda / EventBridge / SNS | Inadvertent or malicious public security group rule exposure; Lambda automatically revokes 0.0.0.0/0 on port 22/3389 within seconds and dispatches SNS alert | [17-b-rule-removed.png](screenshots/17-lambda/17-b-rule-removed.png) | **Verified (Before Screenshot Omitted)** |
+| **SEC-18** | Isolated Management Network (VPC Peering) | AWS VPC Peering / EC2 / NACL | Public exposure of administrative management planes; non-transitive peering links isolated Tools VPC to app private subnets with least-privilege SG egress and stateless NACL rules | [18-peering-curl-success.png](screenshots/18-peering/18-peering-curl-success.png)<br>[18-peering-active.png](screenshots/18-peering/18-peering-active.png) | **Verified** |
 
 > Comprehensive threat model analyses and controls descriptions are available in [docs/security-controls.md](docs/security-controls.md).
 
@@ -195,12 +214,16 @@ Terraform will display the provisioned endpoints upon successful completion:
 - `alb_dns_name`: The origin load balancer DNS.
 - `rds_endpoint`: Private MySQL hostname.
 - `db_secret_arn`: Secrets Manager ARN storing database credentials.
+- `tools_vpc_id`: The isolated Tools VPC ID.
+- `peering_connection_id`: Active VPC peering connection ID.
+- `tools_instance_id`: The monitoring server EC2 instance ID.
+- `tools_instance_private_ip`: Private IP of the monitoring server.
 
 ---
 
 ## 7. How to verify
 
-Verification follows the standardized 10-test protocol defined in Task 20. Completed tests (Tasks 1–16) have been empirically verified and are documented below strictly based on observed evidence. Pending tests requiring Tasks 17–20 are designated accordingly.
+Verification follows the standardized 10-test protocol defined in Task 20. Completed tests (Tasks 1–18) have been empirically verified and are documented below strictly based on observed evidence. Pending tests requiring Tasks 19–20 are designated accordingly.
 
 | # | Test Action | Expected Result | Verified Result | Status | Screenshot Link |
 | :-: | :--- | :--- | :--- | :-: | :--- |
@@ -210,9 +233,9 @@ Verification follows the standardized 10-test protocol defined in Task 20. Compl
 | **4** | Connect to RDS from external network | Connection timeout | PowerShell `Test-NetConnection` failed (`TcpTestSucceeded : False`); `Publicly accessible: No` | **PASS** | [11-rds-external-connection-failed.png](screenshots/11-rds/11-rds-external-connection-failed.png) |
 | **5** | Connect to RDS from app server via SSM | Port 3306 reachable | Bash `/dev/tcp` probe confirmed: `SUCCESS: RDS port 3306 is reachable` *(MySQL auth/queries not tested)* | **PASS (Network Reachability)** | [11-rds-internal-connection.png](screenshots/11-rds/11-rds-internal-connection.png) |
 | **6** | Make S3 object public in bucket | Rejected by Block Public Access | Unauthenticated `curl.exe -I` returned `HTTP/1.1 403 Forbidden`; explicit public ACL mutation **not executed** | **PASS (Anonymous Read Refusal) / PARTIAL** | [10-s3-public-access-refused.png](screenshots/10-s3/10-s3-public-access-refused.png) |
-| **7** | Add SSH rule to App SG (Auto-remediation) | Removed by Lambda in <60s | *Pending Task 17 implementation* | **PENDING** | *Awaiting Task 17* |
+| **7** | Add SSH rule to App SG (Auto-remediation) | Removed by Lambda in <60s | Rogue `0.0.0.0/0:22` rule automatically revoked by Lambda; port 80 preserved; CloudWatch logs confirmed `REMEDIATION_SUCCESS`; real SNS email alert received | **PASS (Before Screenshot Omitted)** | [17-b-rule-removed.png](screenshots/17-lambda/17-b-rule-removed.png)<br>[17-c-lambda-log.png](screenshots/17-lambda/17-c-lambda-log.png)<br>[17-d-sns-email.png](screenshots/17-lambda/17-d-sns-email.png) |
 | **8** | Stop Nginx on one application instance | ALB marks Unhealthy; site up; alarm fires | Target group registered `app-a` Unhealthy; traffic served by `app-b`; CloudWatch alarm `depi-sec-alb-unhealthy-hosts` transitioned to `ALARM`; real SNS alert email received; `depi-sec-overview` dashboard captured spike to 1 and recovery to 0; recovered to Healthy | **PASS** | [12-alb-unhealthy-target.png](screenshots/12-alb/12-alb-unhealthy-target.png)<br>[16-alarm-unhealthy-hosts.png](screenshots/16-cloudwatch/16-alarm-unhealthy-hosts.png)<br>[16-alarm-email-notification.png](screenshots/16-cloudwatch/16-alarm-email-notification.png) |
-| **9** | Curl app server from peering tools VPC | HTTP 200 across peering link | *Pending Task 18 implementation* | **PENDING** | *Awaiting Task 18* |
+| **9** | Curl app server from peering tools VPC | HTTP 200 across peering link | Tools EC2 (`i-039ddfc570cb61341`) reached App A (`10.0.11.161`) over peering `pcx-066a78d3ee36e18f9`; returned HTTP 200 OK rendering `depi-sec-app-a`; direct external access without CloudFront header blocked (403) | **PASS** | [18-peering-active.png](screenshots/18-peering/18-peering-active.png)<br>[18-app-route-table.png](screenshots/18-peering/18-app-route-table.png)<br>[18-tools-route-table.png](screenshots/18-peering/18-tools-route-table.png)<br>[18-peering-curl-success.png](screenshots/18-peering/18-peering-curl-success.png) |
 | **10** | Delete recovery point in locked vault | Blocked by Vault Lock policy | *Pending Task 19 implementation* | **PENDING** | *Awaiting Task 19* |
 
 > For comprehensive step-by-step procedures and testing logs, consult [docs/testing.md](docs/testing.md).
@@ -389,6 +412,16 @@ AWS VPC Flow Logs capture network IP traffic metadata using 14 standard space-de
 > [!NOTE]
 > **Evidence & Testing Boundary Limitation:** The initial "before" screenshot (`17-a-rule-added.png`) was not captured prior to remediation. During live testing, the transient unauthorized port 22 rule was authorized and auto-remediated in real time before a manual browser capture of the insecure state could be obtained. The post-remediation security group state ([`17-b-rule-removed.png`](screenshots/17-lambda/17-b-rule-removed.png)), CloudWatch execution logs ([`17-c-lambda-log.png`](screenshots/17-lambda/17-c-lambda-log.png)), and real SNS email alert ([`17-d-sns-email.png`](screenshots/17-lambda/17-d-sns-email.png)) establish empirical verification of the control. In compliance with testing safety constraints, the dangerous test rule was not re-introduced.
 
+### Task 18 — Isolated Management Network & VPC Peering
+- **VPC Peering Connection Status:** Demonstrates active peering connection `depi-sec-app-tools-peering` (`pcx-066a78d3ee36e18f9`) establishing a direct, non-transitive private link between `depi-sec-app-vpc` (`10.0.0.0/16`) and `depi-sec-tools-vpc` (`10.1.0.0/16`).<br>
+  ![VPC Peering Active](screenshots/18-peering/18-peering-active.png)
+- **App VPC Private Route Table:** Shows route table `depi-sec-private-rt` in the application VPC with active route `10.1.0.0/16` targeting peering connection `pcx-066a78d3ee36e18f9`.<br>
+  ![App Private Route Table](screenshots/18-peering/18-app-route-table.png)
+- **Tools VPC Route Table:** Shows route table `depi-sec-tools-rt` in the tools VPC with active route `10.0.0.0/16` targeting peering connection `pcx-066a78d3ee36e18f9`.<br>
+  ![Tools Route Table](screenshots/18-peering/18-tools-route-table.png)
+- **Private Peering Connectivity Test (HTTP 200 OK & Ping):** Demonstrates interactive/cloud-init execution from `depi-sec-tools-instance` (`i-039ddfc570cb61341`) in subnet `10.1.1.0/24`, successfully executing ICMP ping (0% packet loss) and HTTP GET to private application server `depi-sec-app-a` (`10.0.11.161`), returning HTTP status 200 OK and rendering the application HTML payload across the private peering link.<br>
+  ![Peering Curl Success](screenshots/18-peering/18-peering-curl-success.png)
+
 ---
 
 ## 9. Cost notes
@@ -399,11 +432,11 @@ Building secure cloud platforms requires understanding which services incur hour
 | Service / Resource | Pricing Model | Estimated Cost Impact | Optimization Applied |
 | :--- | :--- | :--- | :--- |
 | **AWS Application Load Balancer** | ~$0.0225/hour + LCU charges | ~$16.20 / month | Single ALB deployed across 2 public subnets |
-| **VPC Interface Endpoints (3x)** | ~$0.01/hour per AZ per endpoint | ~$21.60 / month | Scoped strictly to required SSM services (`ssm`, `ssmmessages`, `ec2messages`) |
+| **VPC Interface Endpoints (3x)** | ~$0.01/hour per AZ per endpoint | ~$21.60 / month | Scoped strictly to required SSM services (`ssm`, `ssmmessages`, `ec2messages`); shared with Tools VPC over peering |
 | **VPC Gateway Endpoint (S3)** | **Free** ($0.00) | $0.00 | Uses Gateway endpoint to route S3 traffic without NAT costs |
 | **NAT Gateways** | ~$0.045/hour + data processing | **$0.00 (Avoided)** | Architected with **Zero NAT Gateways**; all AWS communication utilizes endpoints |
 | **Amazon RDS MySQL (db.t3.micro)** | AWS Free Tier eligible (750 hrs) | $0.00 / month | Sized at `db.t3.micro` with single-AZ deployment for educational scope |
-| **Amazon EC2 (2x t3.micro)** | AWS Free Tier eligible (750 hrs) | $0.00 / month | Uses Amazon Linux 2023 `t3.micro` instances |
+| **Amazon EC2 (2x t3.micro App + 1x t3.micro Tools)** | AWS Free Tier eligible (750 hrs) | $0.00 / month | Uses Amazon Linux 2023 `t3.micro` instances |
 | **AWS Secrets Manager** | $0.40/secret/month | ~$0.40 / month | Single secret storing database master credentials |
 | **AWS CloudFront** | 1 TB free transfer per month | $0.00 / month | `PriceClass_100` (North America and Europe) |
 | **Amazon EFS** | 5 GB free storage per month | $0.00 / month | Lightweight access point with TLS encryption |
@@ -413,6 +446,8 @@ Building secure cloud platforms requires understanding which services incur hour
 | **Amazon Simple Notification Service (SNS)** | Free tier for 1st 1,000 email alerts | $0.00 / month | Scoped email subscription for administrator alerts without KMS CMK costs |
 | **AWS Lambda (Auto-Remediation)** | 1M free requests + 3.2M sec compute/mo | $0.00 / month | Event-driven Python 3.12 remediation runtime (128 MB RAM, <2s execution) |
 | **Amazon EventBridge** | Free tier for AWS service events on default bus | $0.00 / month | Event rule matching CloudTrail `AuthorizeSecurityGroupIngress` |
+| **AWS VPC Peering Connection** | **Free** ($0.00) | $0.00 / month | Intra-account, intra-region peering link (`pcx-066a78d3ee36e18f9`) |
+| **Inter-VPC Data Transfer** | Free within same AZ (`us-east-1a`) | $0.00 / month | Zero data transfer fee for intra-AZ traffic between Tools A and App A |
 
 ### Cost Guardrail Safeguards & Budget Boundaries
 - An active monthly budget (`depi-sec-monthly`) of **$10.00 USD** is enforced.
@@ -474,12 +509,13 @@ Open the AWS Management Console in `us-east-1` and verify that the following das
 12. **Audit trails require multi-layered log shipping to prevent tampering.** Streaming CloudTrail management and data events simultaneously to encrypted Amazon S3 (for long-term tamper-evident archival with log file validation) and Amazon CloudWatch Logs (for real-time metric filtering and rapid querying via CloudWatch Logs Insights) combines immutability with incident response agility.
 13. **Proactive observability and alerting must separate infrastructure metrics from security signals.** While operational alarms (ALB target health, EC2 CPU, RDS storage) track resource availability and performance, security alarms (CloudTrail metric filters for failed console authentication) deliver automated incident awareness. Chaining CloudWatch alarms to Amazon SNS with least-privilege topic policies enables rapid, automated operator notification without introducing fragile third-party dependencies or KMS key overhead.
 14. **Event-driven automated remediation dramatically shrinks threat exposure windows.** Traditional security operations rely on scheduled audits or manual triage, leaving unauthorized firewall modifications exposed for hours or days. Chaining CloudTrail API events through Amazon EventBridge to targeted AWS Lambda functions enables near-real-time automated response that revokes unauthorized public CIDRs (`0.0.0.0/0`) within seconds while preserving legitimate internal rules.
+15. **VPC Peering provides non-transitive isolation but requires strict bidirectional stateless firewall coordination.** Unlike Transit Gateway which centralizes hub-and-spoke routing, VPC peering establishes direct, point-to-point network links without transitivity (preventing accidental routing loops or lateral perimeter bridging). However, routing packets across VPCs is only half the battle: stateless Network ACLs must explicitly permit forward traffic on sensitive destination ports (80, 443, ICMP) *and* return traffic on client ephemeral ports (1024–65535), reinforcing the principle that Layer 3 route reachability is useless without Layer 4 packet-filter alignment.
 
 ---
 
 ## 12. Known limitations
 
-While the platform implements rigorous security controls for completed Tasks 1–17, several known architectural limitations exist that should be addressed in a production deployment:
+While the platform implements rigorous security controls for completed Tasks 1–18, several known architectural limitations exist that should be addressed in a production deployment:
 
 1. **Unencrypted HTTP Between CloudFront and Application Load Balancer:**
    - *Limitation:* The CloudFront origin protocol policy is set to `http-only` on port 80 as mandated by the educational project scope.
@@ -501,5 +537,5 @@ While the platform implements rigorous security controls for completed Tasks 1�
 6. **CloudTrail Event Delivery Latency in Auto-Remediation:**
    - *Limitation:* EventBridge triggers from CloudTrail management events (`AuthorizeSecurityGroupIngress`). AWS CloudTrail delivers events to EventBridge with an inherent service latency typically between 30 and 60 seconds. Auto-remediation is near-real-time rather than synchronous inline blocking.
    - *Scope Limitation:* The Lambda execution policy and function logic strictly target the application security group (`depi-sec-app-sg`). Non-target security groups in the account are not automatically remediated under this specific function scope.
-7. **Outstanding Project Tasks (Tasks 18–20):**
-   - VPC Peering for administrative isolation (Task 18), immutable AWS Backup vault locking (Task 19), and final teardown/cost validation (Task 20) remain to be completed in subsequent implementation phases. Tasks 1–17 are fully deployed, verified, and documented.
+7. **Outstanding Project Tasks (Tasks 19–20):**
+   - Immutable AWS Backup vault locking (Task 19) and final teardown/cost validation (Task 20) remain to be completed in subsequent implementation phases. Tasks 1–18 are fully deployed, verified, and documented.
