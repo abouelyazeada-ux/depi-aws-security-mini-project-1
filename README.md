@@ -5,7 +5,7 @@ This project delivers an enterprise-grade, defense-in-depth web infrastructure o
 The architecture enforces strict network isolation across two Availability Zones, hosting compute and database workloads in private subnets with zero public IP addresses.
 Public user traffic is accelerated and secured at the perimeter via an AWS CloudFront distribution configured with HTTPS viewer access and custom origin header verification.
 In-depth security controls include tiered security group chaining, stateless Network ACLs, AWS Systems Manager keyless administration, and S3 Block Public Access.
-Centralized governance incorporates automated AWS Budgets cost alerts, Secrets Manager credential management, multi-region AWS CloudTrail auditing, and CloudWatch Standard Logging v2 alongside VPC Flow Logs network traffic capture, proactive CloudWatch metric alarms, and a unified operations dashboard backed by Amazon SNS email alerts.
+Centralized governance incorporates automated AWS Budgets cost alerts, Secrets Manager credential management, multi-region AWS CloudTrail auditing, CloudWatch Standard Logging v2, VPC Flow Logs network traffic capture, proactive CloudWatch metric alarms, a unified operations dashboard backed by Amazon SNS email alerts, and event-driven automated security remediation via Amazon EventBridge and AWS Lambda.
 
 ---
 
@@ -86,7 +86,7 @@ flowchart TB
 ### Architecture Description
 The architecture separates public ingress from backend processing and storage across two Availability Zones (`us-east-1a` and `us-east-1b`). Clients access the web application through **AWS CloudFront** over HTTPS, which injects a cryptographic custom header (`X-Origin-Verify`). The **Application Load Balancer (ALB)** in the public subnets checks for this header; direct access to the ALB without the header is blocked with a `403 Forbidden`.
 
-The application tier runs on private Amazon Linux 2023 EC2 instances (`depi-sec-app-a` and `depi-sec-app-b`) with **no public IPs**. Compute instances mount an encrypted **Amazon EFS** shared file system and query a private **Amazon RDS MySQL 8.0** instance. Direct management is handled out-of-band via **AWS Systems Manager Session Manager** through dedicated VPC Interface Endpoints, while S3 storage requests utilize a private **VPC Gateway Endpoint**, ensuring zero exposure to the public internet. Comprehensive auditing and observability are provided by multi-region **AWS CloudTrail** (auditing management actions and S3 data events into a centralized log bucket and CloudWatch Logs), VPC-level **VPC Flow Logs** (`depi-sec-vpc-flow-log`) capturing network IP traffic across every ENI, and proactive **Amazon CloudWatch Alarms** chained to **Amazon SNS** (`depi-sec-alerts`) with a consolidated operational dashboard (**depi-sec-overview**).
+The application tier runs on private Amazon Linux 2023 EC2 instances (`depi-sec-app-a` and `depi-sec-app-b`) with **no public IPs**. Compute instances mount an encrypted **Amazon EFS** shared file system and query a private **Amazon RDS MySQL 8.0** instance. Direct management is handled out-of-band via **AWS Systems Manager Session Manager** through dedicated VPC Interface Endpoints, while S3 storage requests utilize a private **VPC Gateway Endpoint**, ensuring zero exposure to the public internet. Comprehensive auditing and observability are provided by multi-region **AWS CloudTrail** (auditing management actions and S3 data events into a centralized log bucket and CloudWatch Logs), VPC-level **VPC Flow Logs** (`depi-sec-vpc-flow-log`) capturing network IP traffic across every ENI, and proactive **Amazon CloudWatch Alarms** chained to **Amazon SNS** (`depi-sec-alerts`) with a consolidated operational dashboard (**depi-sec-overview**). Continuous automated response is enforced by **Amazon EventBridge** and **AWS Lambda** (`depi-sec-auto-remediation`): unauthorized ingress rules opening ports 22 or 3389 to `0.0.0.0/0` are detected via CloudTrail management events and automatically revoked in seconds under least-privilege IAM controls, accompanied by real-time Amazon SNS administrator email alerts.
 
 ---
 
@@ -378,6 +378,17 @@ AWS VPC Flow Logs capture network IP traffic metadata using 14 standard space-de
 - **Real SNS Alert Email Delivery:** Shows the actual email notification received from Amazon SNS (`depi-sec-alerts`) delivering the alarm payload with state transition (`OK -> ALARM`), affected resource ARNs, and threshold details.<br>
   ![Alarm Email Notification](screenshots/16-cloudwatch/16-alarm-email-notification.png)
 
+### Task 17 — Event-Driven Security Auto-Remediation (Lambda & EventBridge)
+- **Automated Ingress Rule Revocation:** Demonstrates post-remediation verification in the AWS EC2 Management Console for `depi-sec-app-sg` (`sg-045206e75cb53b510`). Following an unauthorized manual authorization of TCP port 22 from `0.0.0.0/0`, the rogue rule was automatically identified and revoked by Lambda, restoring the security group to its hardened baseline where only legitimate HTTP port 80 traffic from `depi-sec-alb-sg` is permitted.<br>
+  ![Rule Removed by Lambda](screenshots/17-lambda/17-b-rule-removed.png)
+- **Lambda CloudWatch Logs Execution Stream:** Displays CloudWatch Logs stream `/aws/lambda/depi-sec-auto-remediation` capturing the complete automated response: `REMEDIATION_TRIGGERED`, `REMEDIATION_SUCCESS`, the specific security group ID, and `SNS_ALERT_PUBLISHED` confirming rule removal and alert dispatch without leaking sensitive event payloads.<br>
+  ![Lambda CloudWatch Log](screenshots/17-lambda/17-c-lambda-log.png)
+- **Real SNS Auto-Remediation Alert Email:** Displays the actual email notification delivered by Amazon SNS (`depi-sec-alerts`) to the administrator, detailing the incident reason, remediated security group ID (`sg-045206e75cb53b510`), revoked permission payload, UTC timestamp, and remediation engine.<br>
+  ![Auto-Remediation Email](screenshots/17-lambda/17-d-sns-email.png)
+
+> [!NOTE]
+> **Evidence & Testing Boundary Limitation:** The initial "before" screenshot (`17-a-rule-added.png`) was not captured prior to remediation. During live testing, the transient unauthorized port 22 rule was authorized and auto-remediated in real time before a manual browser capture of the insecure state could be obtained. The post-remediation security group state ([`17-b-rule-removed.png`](screenshots/17-lambda/17-b-rule-removed.png)), CloudWatch execution logs ([`17-c-lambda-log.png`](screenshots/17-lambda/17-c-lambda-log.png)), and real SNS email alert ([`17-d-sns-email.png`](screenshots/17-lambda/17-d-sns-email.png)) establish empirical verification of the control. In compliance with testing safety constraints, the dangerous test rule was not re-introduced.
+
 ---
 
 ## 9. Cost notes
@@ -400,6 +411,8 @@ Building secure cloud platforms requires understanding which services incur hour
 | **Amazon CloudWatch Logs (VPC Flow Logs)** | $0.50/GB ingested + $0.03/GB/mo storage | ~$0.25 / month | Aggregates VPC-level network traffic with 14-day retention |
 | **Amazon CloudWatch (Alarms & Dashboard)** | $0.10/alarm/month + free dashboard tier | ~$0.50 / month | 5 standard-resolution alarms with dashboard utilizing free tier allocation |
 | **Amazon Simple Notification Service (SNS)** | Free tier for 1st 1,000 email alerts | $0.00 / month | Scoped email subscription for administrator alerts without KMS CMK costs |
+| **AWS Lambda (Auto-Remediation)** | 1M free requests + 3.2M sec compute/mo | $0.00 / month | Event-driven Python 3.12 remediation runtime (128 MB RAM, <2s execution) |
+| **Amazon EventBridge** | Free tier for AWS service events on default bus | $0.00 / month | Event rule matching CloudTrail `AuthorizeSecurityGroupIngress` |
 
 ### Cost Guardrail Safeguards & Budget Boundaries
 - An active monthly budget (`depi-sec-monthly`) of **$10.00 USD** is enforced.
@@ -460,12 +473,13 @@ Open the AWS Management Console in `us-east-1` and verify that the following das
 11. **Comprehensive network visibility requires passive flow auditing at the VPC root boundary.** Provisioning VPC Flow Logs at the VPC level provides unified visibility into every Elastic Network Interface without requiring in-guest agents and operating independently of guest operating system and application workloads. Analyzing the 14 default fields enables engineers to distinguish normal traffic (`ACCEPT`) from scanning activity or unauthorized lateral movement (`REJECT`) across both public and private subnets.
 12. **Audit trails require multi-layered log shipping to prevent tampering.** Streaming CloudTrail management and data events simultaneously to encrypted Amazon S3 (for long-term tamper-evident archival with log file validation) and Amazon CloudWatch Logs (for real-time metric filtering and rapid querying via CloudWatch Logs Insights) combines immutability with incident response agility.
 13. **Proactive observability and alerting must separate infrastructure metrics from security signals.** While operational alarms (ALB target health, EC2 CPU, RDS storage) track resource availability and performance, security alarms (CloudTrail metric filters for failed console authentication) deliver automated incident awareness. Chaining CloudWatch alarms to Amazon SNS with least-privilege topic policies enables rapid, automated operator notification without introducing fragile third-party dependencies or KMS key overhead.
+14. **Event-driven automated remediation dramatically shrinks threat exposure windows.** Traditional security operations rely on scheduled audits or manual triage, leaving unauthorized firewall modifications exposed for hours or days. Chaining CloudTrail API events through Amazon EventBridge to targeted AWS Lambda functions enables near-real-time automated response that revokes unauthorized public CIDRs (`0.0.0.0/0`) within seconds while preserving legitimate internal rules.
 
 ---
 
 ## 12. Known limitations
 
-While the platform implements rigorous security controls for completed Tasks 1–16, several known architectural limitations exist that should be addressed in a production deployment:
+While the platform implements rigorous security controls for completed Tasks 1–17, several known architectural limitations exist that should be addressed in a production deployment:
 
 1. **Unencrypted HTTP Between CloudFront and Application Load Balancer:**
    - *Limitation:* The CloudFront origin protocol policy is set to `http-only` on port 80 as mandated by the educational project scope.
@@ -484,5 +498,8 @@ While the platform implements rigorous security controls for completed Tasks 1�
 5. **Cost Monitoring vs Hard Spending Limits:**
    - *Limitation:* AWS Budgets provides alerts and automated IAM deny policies for new resources, but AWS does not natively enforce hard billing caps that automatically terminate running infrastructure.
    - *Production Solution:* Deploy automated EventBridge and Lambda functions to shut down or delete test resources if budget thresholds are breached.
-6. **Outstanding Project Tasks (Tasks 17–20):**
-   - Automated Lambda security remediation (Task 17), VPC Peering for administrative isolation (Task 18), immutable AWS Backup vault locking (Task 19), and final teardown/cost validation (Task 20) remain to be completed in subsequent implementation phases. Tasks 1–16 are fully deployed, verified, and documented.
+6. **CloudTrail Event Delivery Latency in Auto-Remediation:**
+   - *Limitation:* EventBridge triggers from CloudTrail management events (`AuthorizeSecurityGroupIngress`). AWS CloudTrail delivers events to EventBridge with an inherent service latency typically between 30 and 60 seconds. Auto-remediation is near-real-time rather than synchronous inline blocking.
+   - *Scope Limitation:* The Lambda execution policy and function logic strictly target the application security group (`depi-sec-app-sg`). Non-target security groups in the account are not automatically remediated under this specific function scope.
+7. **Outstanding Project Tasks (Tasks 18–20):**
+   - VPC Peering for administrative isolation (Task 18), immutable AWS Backup vault locking (Task 19), and final teardown/cost validation (Task 20) remain to be completed in subsequent implementation phases. Tasks 1–17 are fully deployed, verified, and documented.

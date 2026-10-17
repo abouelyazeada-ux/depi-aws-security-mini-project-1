@@ -1,8 +1,8 @@
-# Security Testing & Verification Report — Tasks 1–15
+# Security Testing & Verification Report — Tasks 1–17
 
-This document records the empirical validation of the security controls implemented in **Tasks 1–15**, following the standardized test framework outlined in **Task 20** of `Project-1.pdf`.
+This document records the empirical validation of the security controls implemented in **Tasks 1–17**, following the standardized test framework outlined in **Task 20** of `Project-1.pdf`.
 
-Each test case details the operational procedure performed, the expected security outcome, the observed real-world behavior, and links to the supporting screenshot evidence. Tests are strictly documented based on confirmed evidence without assuming or inferring unexecuted steps. Tests associated with **Tasks 16–20** that require pending infrastructure are explicitly identified as **Pending Implementation**.
+Each test case details the operational procedure performed, the expected security outcome, the observed real-world behavior, and links to the supporting screenshot evidence. Tests are strictly documented based on confirmed evidence without assuming or inferring unexecuted steps. Tests associated with **Tasks 18–20** that require pending infrastructure are explicitly identified as **Pending Implementation**.
 
 ---
 
@@ -16,7 +16,7 @@ Each test case details the operational procedure performed, the expected securit
 | **4** | Direct connection to RDS from external client | Amazon RDS MySQL (`depi-sec-db`) | Connection fails / timeout | PowerShell `Test-NetConnection` to port 3306 failed (`TcpTestSucceeded : False`) | **PASS** | [`11-rds-external-connection-failed.png`](../screenshots/11-rds/11-rds-external-connection-failed.png)<br>[`11-rds-private-access.png`](../screenshots/11-rds/11-rds-private-access.png) |
 | **5** | TCP connection to RDS from internal EC2 instance | Amazon RDS MySQL (`depi-sec-db`) | Port 3306 reachable | Bash `/dev/tcp` probe confirmed: `SUCCESS: RDS port 3306 is reachable` | **PASS (Network Reachability)** | [`11-rds-internal-connection.png`](../screenshots/11-rds/11-rds-internal-connection.png) |
 | **6** | Anonymous / public access to S3 test object | Amazon S3 (`depi-sec-app-*`) | Access denied / refused | Unauthenticated `curl -I` returned `HTTP/1.1 403 Forbidden`; explicit ACL mutation **not executed** | **PASS (Anonymous Read Refusal) / PARTIAL** | [`10-s3-public-access-refused.png`](../screenshots/10-s3/10-s3-public-access-refused.png)<br>[`10-app-bucket-public-access-block.png`](../screenshots/10-s3/10-app-bucket-public-access-block.png) |
-| **7** | Add SSH rule (`0.0.0.0/0:22`) to App SG | Security Auto-Remediation | Removed by Lambda in <60s | *Pending Task 17 Lambda deployment* | **PENDING** | *Awaiting Task 17* |
+| **7** | Add SSH rule (`0.0.0.0/0:22`) to App SG | Security Auto-Remediation (Lambda & EventBridge) | Rogue rule removed by Lambda; HTTP port 80 preserved; CloudWatch log and SNS email received | Port 22 from `0.0.0.0/0` manually authorized on `depi-sec-app-sg`; EventBridge event triggered Lambda; CloudWatch logs confirmed `REMEDIATION_TRIGGERED`, `REMEDIATION_SUCCESS`, and `SNS_ALERT_PUBLISHED`; rule revoked; original HTTP port 80 rule remained intact; real SNS email alert received | **PASS (Automated Remediation Verified; Before Screenshot Omitted)** | [`17-b-rule-removed.png`](../screenshots/17-lambda/17-b-rule-removed.png)<br>[`17-c-lambda-log.png`](../screenshots/17-lambda/17-c-lambda-log.png)<br>[`17-d-sns-email.png`](../screenshots/17-lambda/17-d-sns-email.png) |
 | **8** | Stop Nginx web service on one instance | ALB Target Group (`depi-sec-tg`) & CloudWatch Alarms | Target marked Unhealthy; traffic routes to healthy target; CloudWatch alarm fires; alert email sent | `app-a` marked Unhealthy in console; traffic served by `app-b`; CloudWatch alarm `depi-sec-alb-unhealthy-hosts` transitioned to `ALARM`; real SNS alert email received; `depi-sec-overview` dashboard captured spike to 1 and recovery to 0; returned to Healthy | **PASS** | [`12-alb-unhealthy-target.png`](../screenshots/12-alb/12-alb-unhealthy-target.png)<br>[`12-alb-failover-working.png`](../screenshots/12-alb/12-alb-failover-working.png)<br>[`12-alb-recovered.png`](../screenshots/12-alb/12-alb-recovered.png)<br>[`16-alarm-unhealthy-hosts.png`](../screenshots/16-cloudwatch/16-alarm-unhealthy-hosts.png)<br>[`16-alarm-email-notification.png`](../screenshots/16-cloudwatch/16-alarm-email-notification.png)<br>[`16-dashboard-overview.png`](../screenshots/16-cloudwatch/16-dashboard-overview.png) |
 | **9** | Curl app server from peering tools VPC | VPC Peering Connection | HTTP 200 via private route | *Pending Task 18 Peering deployment* | **PENDING** | *Awaiting Task 18* |
 | **10** | Delete recovery point in locked backup vault | AWS Backup Vault Lock | Access Denied by Vault Lock | *Pending Task 19 Backup deployment* | **PENDING** | *Awaiting Task 19* |
@@ -164,6 +164,43 @@ Each test case details the operational procedure performed, the expected securit
 
 ---
 
+### Test 7: Security Group Ingress Auto-Remediation (Task 17)
+- **Objective:** Validate that an unauthorized public ingress rule (TCP port 22 from `0.0.0.0/0`) added to the application security group is automatically detected via AWS CloudTrail, routed through Amazon EventBridge, and revoked by AWS Lambda (`depi-sec-auto-remediation`), that an incident alert is published via Amazon SNS (`depi-sec-alerts`), that legitimate ingress rules (HTTP port 80 from ALB SG) remain intact, and that structured telemetry is recorded in CloudWatch Logs.
+- **Empirical Evidence & Observed Procedure:**
+  1. Inspected baseline ingress configuration on `depi-sec-app-sg` (`sg-045206e75cb53b510`), confirming only authorized inbound HTTP port 80 traffic from `depi-sec-alb-sg` (`sg-044c25590953c6ec3`).
+  2. Manually authorized a dangerous inbound rule on `depi-sec-app-sg` via AWS Management Console:
+     - Protocol: `TCP (6)`
+     - Port: `22` (SSH)
+     - Source: `0.0.0.0/0`
+     - Description: `Manual unauthorized SSH test`
+  3. AWS CloudTrail captured management event `AuthorizeSecurityGroupIngress` from service source `ec2.amazonaws.com` targeting `groupId: "sg-045206e75cb53b510"`.
+  4. Amazon EventBridge rule `depi-sec-remediate-open-ssh` matched the event pattern and triggered target `AutoRemediateOpenSSH`, invoking Lambda function `depi-sec-auto-remediation`.
+  5. The Lambda function executed under IAM role `depi-sec-lambda-remediation-role`:
+     - Validated the event envelope and confirmed `groupId == TARGET_SECURITY_GROUP_ID`.
+     - Queried active rules via `ec2:DescribeSecurityGroups`.
+     - Identified the unauthorized `0.0.0.0/0:22` rule in `IpPermissions`.
+     - Issued discrete `ec2:RevokeSecurityGroupIngress` to revoke **only** `0.0.0.0/0`, preserving the legitimate port 80 rule.
+     - Dispatched a security alert to Amazon SNS topic `depi-sec-alerts`.
+  6. Verified CloudWatch Logs stream `/aws/lambda/depi-sec-auto-remediation` confirming the complete remediation sequence:
+     - `{"action": "EVENT_RECEIVED", "detail_type": "AWS API Call via CloudTrail", "event_name": "AuthorizeSecurityGroupIngress"}`
+     - `{"action": "SECURITY_GROUP_INSPECTED", "security_group_id": "sg-045206e75cb53b510", "total_rules_inspected": 2}`
+     - `{"action": "REMEDIATION_TRIGGERED", "security_group_id": "sg-045206e75cb53b510", "offending_rules_count": 1}`
+     - `{"action": "REMEDIATION_SUCCESS", "security_group_id": "sg-045206e75cb53b510", "revoked_rules_count": 1}`
+     - `{"action": "SNS_ALERT_PUBLISHED", "topic_arn": "arn:aws:sns:us-east-1:882034443616:depi-sec-alerts", "subject": "[AUTO-REMEDIATION] Revoked open ingress on sg-045206e75cb53b510"}`
+  7. Re-inspected `depi-sec-app-sg` in the EC2 Console: confirmed the SSH rule was completely gone, and the original HTTP port 80 rule from `depi-sec-alb-sg` remained fully intact.
+  8. Confirmed receipt of an automated email alert in the administrator inbox from Amazon SNS, detailing the remediated security group, revoked permission payload, UTC timestamp, and remediation engine.
+  9. *Documentation of Evidence Limitation:*
+     The initial "before" screenshot (`17-a-rule-added.png`) was not captured prior to automated remediation. Because the auto-remediation workflow triggered and revoked the unauthorized rule in real time, the transient insecure state was already cleared before a manual browser capture could be obtained. The post-remediation security group state ([`17-b-rule-removed.png`](../screenshots/17-lambda/17-b-rule-removed.png)), CloudWatch execution logs ([`17-c-lambda-log.png`](../screenshots/17-lambda/17-c-lambda-log.png)), and real SNS email alert ([`17-d-sns-email.png`](../screenshots/17-lambda/17-d-sns-email.png)) confirm the operation of the control. In compliance with testing safety constraints, the dangerous rule was not re-authorized.
+- **Expected Outcome:** Rogue rule removed automatically by Lambda, legitimate HTTP rule preserved, CloudWatch execution logs record successful revocation, and real SNS email notification delivered.
+- **Actual Result:** The port 22 rule was automatically revoked in <60 seconds, port 80 from ALB remained intact, CloudWatch logs confirmed `REMEDIATION_SUCCESS`, and the SNS notification email was received.
+- **Status:** **PASS (Automated Remediation Verified; Before Screenshot Omitted)**
+- **Screenshots:**
+  - [`17-b-rule-removed.png`](../screenshots/17-lambda/17-b-rule-removed.png) — EC2 Console showing `depi-sec-app-sg` post-remediation with port 22 removed and only port 80 from ALB remaining.
+  - [`17-c-lambda-log.png`](../screenshots/17-lambda/17-c-lambda-log.png) — CloudWatch Logs stream displaying `REMEDIATION_TRIGGERED`, `REMEDIATION_SUCCESS`, and `SNS_ALERT_PUBLISHED`.
+  - [`17-d-sns-email.png`](../screenshots/17-lambda/17-d-sns-email.png) — Real email notification received via Amazon SNS `depi-sec-alerts`.
+
+---
+
 ### Test 8: Target Group Health Check, Automatic Failover & CloudWatch Alarm Verification
 - **Objective:** Verify that the Application Load Balancer detects when an application instance becomes unhealthy, routes requests to the healthy instance, triggers CloudWatch Alarm `depi-sec-alb-unhealthy-hosts`, dispatches an automated SNS email notification, visualizes the failure on the `depi-sec-overview` operational dashboard, and recovers gracefully upon service restoration.
 - **Empirical Evidence & Observed Procedure:**
@@ -202,14 +239,10 @@ Each test case details the operational procedure performed, the expected securit
 
 ---
 
-## Pending Security Test Cases (Tasks 17–20)
+## Pending Security Test Cases (Tasks 18–20)
 
 The remaining test cases from Task 20 require components scheduled for subsequent project tasks:
 
-- **Test 7: Security Group Auto-Remediation (Task 17)**
-  - *Procedure:* Add rule `0.0.0.0/0:22` to `depi-sec-app-sg`.
-  - *Expected Result:* EventBridge triggers a Lambda function that removes the rogue rule and publishes an alert to SNS.
-  - *Status:* **Pending Task 17 implementation.**
 - **Test 9: Inter-VPC Private Communication via Peering (Task 18)**
   - *Procedure:* From an administrative instance in the Tools VPC, curl the private IP of an application server across the peering connection.
   - *Expected Result:* HTTP 200 returned over private route without transit across the public internet.

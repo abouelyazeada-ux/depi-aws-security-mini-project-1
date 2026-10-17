@@ -2,3 +2,6 @@
 *.tfstate.*
 .terraform/
 *.tfvars
+*.zip
+__pycache__/
+*.pyc

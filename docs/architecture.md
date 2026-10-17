@@ -1,6 +1,6 @@
 # Cloud Infrastructure Architecture — Secure AWS Web Platform
 
-This document provides a comprehensive technical breakdown of the multi-tier, multi-AZ cloud architecture implemented for DEPI Mini Project 1. It details the network topology, routing architecture, component placement rationale, data flows, and security boundaries across **Tasks 1–15**.
+This document provides a comprehensive technical breakdown of the multi-tier, multi-AZ cloud architecture implemented for DEPI Mini Project 1. It details the network topology, routing architecture, component placement rationale, data flows, and security boundaries across **Tasks 1–17**.
 
 ---
 
@@ -16,6 +16,8 @@ The platform is designed around the core security principles of **Defense in Dep
 - **Private Database Tier:** Amazon RDS MySQL 8.0 operates inside a private DB subnet group spanning both Availability Zones. It is marked `publicly_accessible = false`, has encrypted storage (`gp3`), and accepts inbound traffic exclusively on TCP port 3306 originating from the application security group.
 - **Private AWS Service Connectivity:** Private subnets reach Amazon S3 through a VPC Gateway Endpoint and AWS Systems Manager through three VPC Interface Endpoints (`ssm`, `ssmmessages`, `ec2messages`), eliminating the requirement for an internet egress route or NAT gateway for server management and data storage.
 - **VPC-Level Network Traffic Auditing:** A VPC Flow Log (`fl-01baa2f74df906054`, status `ACTIVE`, delivery `SUCCESS`) attached to the root of `depi-sec-app-vpc` (`vpc-0f7551daf8a303b6b`) captures IP traffic across all network interfaces (public ALB, private EC2, RDS, EFS, and endpoints) for traffic type `ALL`, publishing to Amazon CloudWatch Logs (`/depi-sec/vpc/flowlogs`) with 14-day retention via dedicated IAM role `depi-sec-vpc-flow-logs-role`.
+- **Proactive Platform Observability:** Amazon CloudWatch Metric Alarms, CloudTrail security metric filters, and an operations dashboard (`depi-sec-overview`) monitor infrastructure availability and security anomalies, integrated with Amazon SNS (`depi-sec-alerts`) for real-time alerting.
+- **Event-Driven Security Auto-Remediation:** Automated response via Amazon EventBridge and AWS Lambda (`depi-sec-auto-remediation`) listening to CloudTrail management events on `aws.ec2`. If an inbound rule exposes TCP port 22 or 3389 to `0.0.0.0/0` on `depi-sec-app-sg`, Lambda automatically revokes the offending public CIDR while preserving legitimate internal rules, logging structured events to CloudWatch Logs (`/aws/lambda/depi-sec-auto-remediation`) and dispatching an incident notification to Amazon SNS (`depi-sec-alerts`).
 
 ---
 
@@ -271,6 +273,43 @@ The `depi-sec-private-nacl` is explicitly associated with private subnets (`depi
    - **Least-Privilege Topic Access Policy:** Topic policy `depi-sec-alerts-policy` explicitly allows the owning AWS account root (`arn:aws:iam::<account-id>:root`) full topic management rights, while restricting publishing rights strictly to service principal `cloudwatch.amazonaws.com` conditioned on `aws:SourceAccount`. Cross-account and public access are completely prohibited.
    - **Encryption Architecture Decision:** The SNS topic is intentionally configured without AWS-managed KMS encryption. CloudWatch Alarms is incompatible with the default AWS-managed KMS key (`alias/aws/sns`) because its key policy cannot be modified to grant decrypt/generate data key permissions to `cloudwatch.amazonaws.com`. Maintaining an unencrypted topic prevents delivery failure and avoids recurring Customer Managed Key (CMK) monthly charges ($1.00/month).
 
+### 7.7. Event-Driven Security Auto-Remediation Workflow (Task 17)
+1. **Event Ingestion & Trigger Pipeline:**
+   - When an administrator, service, or rogue actor authorizes an inbound rule (e.g., opening SSH TCP port 22 from `0.0.0.0/0`), AWS CloudTrail captures the AWS management API call `AuthorizeSecurityGroupIngress` from service source `ec2.amazonaws.com`.
+   - CloudTrail automatically delivers the management audit event to the Amazon EventBridge default event bus in `us-east-1`.
+   - EventBridge rule `depi-sec-remediate-open-ssh` evaluates the event against its pattern:
+     ```json
+     {
+       "source": ["aws.ec2"],
+       "detail-type": ["AWS API Call via CloudTrail"],
+       "detail": {
+         "eventSource": ["ec2.amazonaws.com"],
+         "eventName": ["AuthorizeSecurityGroupIngress"]
+       }
+     }
+     ```
+   - Matches trigger target `AutoRemediateOpenSSH`, invoking AWS Lambda function `depi-sec-auto-remediation` via resource-based invoke permission `AllowExecutionFromEventBridge`.
+2. **Defensive Validation & Scope Control:**
+   - The Python 3.12 function validates the EventBridge envelope (`source`, `detail-type`, `eventSource`, `eventName`).
+   - Failed API calls (containing `errorCode` or `errorMessage`) are safely ignored, as no actual security group changes occurred.
+   - Extracts and validates the security group ID using regex `^sg-[0-9a-fA-F]{8,17}$`.
+   - Evaluates the group ID against `TARGET_SECURITY_GROUP_ID` (`depi-sec-app-sg`). Non-target security groups are safely bypassed with a structured log to prevent out-of-scope modifications.
+3. **Discrete CIDR Revocation vs Rule Destruction:**
+   - Queries current permissions via `ec2:DescribeSecurityGroups`.
+   - Scans `IpPermissions` for IPv4 public exposure (`0.0.0.0/0`) on sensitive administrative ports: TCP 22 (SSH), TCP 3389 (RDP), overlapping port ranges (e.g., 20–25, 3000–4000), or all-traffic protocol `-1`.
+   - Constructs a discrete revocation payload containing **only** `IpRanges: [{"CidrIp": "0.0.0.0/0"}]` for the offending port range.
+   - Preserves legitimate CIDRs (e.g., `10.0.0.0/16`), security group references (ALB SG on port 80), and prefix lists within the same rule set.
+4. **Race Condition & Duplicate Event Protection:**
+   - If `ec2:RevokeSecurityGroupIngress` encounters `InvalidPermission.NotFound` (due to duplicate EventBridge event delivery or concurrent execution), the function re-describes the security group's active rules.
+   - If no dangerous rules remain, it verifies the group is clean (`ALREADY_CLEAN`) and suppresses redundant SNS notifications.
+   - If dangerous rules remain, it reports incomplete remediation (`FAILED_DANGEROUS_RULES_REMAIN`) rather than falsely claiming success.
+5. **Decoupled Incident Alerting:**
+   - Upon successful revocation, the function formats an operational incident report containing the security group ID, UTC timestamp, AWS region, revoked rule payload, and detection rationale.
+   - Dispatches the payload via `sns:Publish` to topic `depi-sec-alerts`, which asynchronously delivers the email notification to the subscribed security administrator.
+6. **Latency & Scope Boundaries:**
+   - *CloudTrail Latency:* Management events typically reach EventBridge within 30 to 60 seconds of API execution. The auto-remediation workflow operates near-real-time rather than as an inline blocking control.
+   - *Security Group Scope:* Least-privilege IAM permissions and function logic constrain remediation authority strictly to the designated application security group (`depi-sec-app-sg`).
+
 ---
 
 ## 8. Architectural Limitations & Security Boundary Analysis
@@ -307,3 +346,5 @@ As required by the project specifications, the architecture incorporates educati
 | **VPC Flow Logs** | VPC Root (`vpc-0f7551daf8a303b6b`) | Out-of-band, hypervisor-level monitoring across all ENIs in all subnets, capturing network traffic metadata into CloudWatch Logs independently of guest instances without consuming host instance compute resources. |
 | **CloudWatch Alarms & Dashboard** | Regional (`us-east-1`) | Aggregates operational and security telemetry across EC2, ALB, RDS, and CloudTrail log streams, providing proactive incident notification and consolidated visual dashboard monitoring. |
 | **SNS Alert Topic (`depi-sec-alerts`)** | Regional (`us-east-1`) | Decoupled serverless notification service delivering real-time administrator alerts for infrastructure failures and security anomalies with strict least-privilege IAM policies. |
+| **Auto-Remediation Lambda (`depi-sec-auto-remediation`)** | Regional Serverless (`us-east-1`) | Event-driven Python 3.12 runtime with least-privilege IAM role executing near-real-time revocation of unauthorized public ingress rules without hosting infrastructure overhead. |
+| **EventBridge Rule (`depi-sec-remediate-open-ssh`)** | Regional Default Bus (`us-east-1`) | Decoupled event routing evaluating CloudTrail EC2 API calls and triggering remediation Lambda with minimal overhead. |

@@ -1,12 +1,12 @@
 # Security Controls Matrix — Secure AWS Web Platform
 
-This document serves as the primary security compliance audit reference for the platform. It details each security control implemented across **Tasks 1–15**, identifying the governing AWS service, the threat or attack vector mitigated, the implementation mechanism in Terraform, and the verifying screenshot evidence.
+This document serves as the primary security compliance audit reference for the platform. It details each security control implemented across **Tasks 1–17**, identifying the governing AWS service, the threat or attack vector mitigated, the implementation mechanism in Terraform, and the verifying screenshot evidence.
 
-Unimplemented controls scheduled for **Tasks 16–20** are clearly designated as **Pending Implementation** at the conclusion of this document.
+Unimplemented controls scheduled for **Tasks 18–20** are clearly designated as **Pending Implementation** at the conclusion of this document.
 
 ---
 
-## 1. Security Controls Master Table (Tasks 1–15)
+## 1. Security Controls Master Table (Tasks 1–17)
 
 | Control ID | Security Control | AWS Service | Threat Mitigated | Terraform Implementation | Verifying Screenshot | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -26,6 +26,7 @@ Unimplemented controls scheduled for **Tasks 16–20** are clearly designated as
 | **SEC-14** | **Centralized Management Audit Logging** | AWS CloudTrail | Undetected API modifications, administrative credential misuse, unauthorized security group or IAM changes. | Multi-region trail `depi-sec-trail` with log file validation, management events (Read/Write: All), and S3 read data events for `depi-sec-app-*`. Delivers logs to central S3 logs bucket (`depi-sec-logs-*`) and CloudWatch Log Group `/aws/cloudtrail/depi-sec-trail` (14-day retention) via IAM role `depi-sec-cloudtrail-cw-role`. S3 bucket policy enforces `aws:SourceArn` restriction and `bucket-owner-full-control`. | [`14-cloudtrail-settings.png`](../screenshots/14-cloudtrail/14-cloudtrail-settings.png)<br>[`14-cloudtrail-event-identity.png`](../screenshots/14-cloudtrail/14-cloudtrail-event-identity.png) | **Verified** |
 | **SEC-15** | **VPC Flow Logs & Network Traffic Auditing** | Amazon VPC & CloudWatch Logs | Undetected lateral network movement, unauthorized port scanning, data exfiltration, covert channel communication. | `aws_flow_log.app_vpc_flow_log` (`fl-01baa2f74df906054`) attached to `aws_vpc.app_vpc` (`vpc-0f7551daf8a303b6b`) for `traffic_type = "ALL"`, publishing to `/depi-sec/vpc/flowlogs` (14-day retention) via least-privilege role `depi-sec-vpc-flow-logs-role`. Ingested `ACCEPT` records and 4 `REJECT` records on destination TCP port 22 verified via CloudWatch Logs Insights (including internal source `10.0.11.161` to `10.0.12.241`). | [`15-flowlog-reject-record.png`](../screenshots/15-flowlogs/15-flowlog-reject-record.png) | **Verified** |
 | **SEC-16** | **CloudWatch Alarms, Security Metric Filtering & Proactive Alerting** | Amazon CloudWatch & Amazon SNS | Delayed incident detection for compute CPU exhaustion, target health failure, database storage starvation, and brute-force console login attempts. | 5 CloudWatch metric alarms deployed: (1) `depi-sec-ec2-cpu-high-app-a` (>70%), (2) `depi-sec-ec2-cpu-high-app-b` (>70%), (3) `depi-sec-alb-unhealthy-hosts` (>0), (4) `depi-sec-rds-free-storage-low` (<2 GB), (5) `depi-sec-failed-console-logins-alarm` (>=3 in 5m via CloudTrail metric filter `{ ($.eventName = "ConsoleLogin") && ($.errorMessage = "Failed authentication") }`). Alerts delivered to `depi-sec-alerts` SNS topic. ALB alarm transition (`OK -> ALARM`), real email alert delivery, and recovery (`ALARM -> OK`) verified during Nginx test. Operational dashboard `depi-sec-overview` visualizes live metrics. | [`16-dashboard-overview.png`](../screenshots/16-cloudwatch/16-dashboard-overview.png)<br>[`16-alarm-unhealthy-hosts.png`](../screenshots/16-cloudwatch/16-alarm-unhealthy-hosts.png)<br>[`16-alarm-email-notification.png`](../screenshots/16-cloudwatch/16-alarm-email-notification.png) | **Verified** |
+| **SEC-17** | **Event-Driven Security Auto-Remediation** | AWS Lambda, EventBridge, CloudTrail & SNS | Rogue or accidental security group modification exposing sensitive ports (TCP 22 SSH, TCP 3389 RDP) to the public internet (`0.0.0.0/0`); zero-day exposure windows. | EventBridge rule `depi-sec-remediate-open-ssh` triggers on CloudTrail `AuthorizeSecurityGroupIngress`. Python 3.12 Lambda `depi-sec-auto-remediation` assumed by least-privilege role `depi-sec-lambda-remediation-role` (strictly scoped to `ec2:DescribeSecurityGroups`, `ec2:RevokeSecurityGroupIngress` on `depi-sec-app-sg`, and `sns:Publish` on `depi-sec-alerts`). Validates event, verifies `TARGET_SECURITY_GROUP_ID`, revokes only `0.0.0.0/0` (preserving port 80 from ALB SG and internal CIDRs), handles duplicate/conflict events via active rule re-inspection, logs structured telemetry, and dispatches incident alert email. | [`17-b-rule-removed.png`](../screenshots/17-lambda/17-b-rule-removed.png)<br>[`17-c-lambda-log.png`](../screenshots/17-lambda/17-c-lambda-log.png)<br>[`17-d-sns-email.png`](../screenshots/17-lambda/17-d-sns-email.png)<br>*(Note: `17-a-rule-added.png` omitted; rule remediated live before manual capture)* | **Verified** |
 
 ---
 
@@ -126,13 +127,43 @@ The CloudWatch dashboard consolidates real-time telemetry into four widgets:
 
 ---
 
-## 5. Pending Security Controls (Tasks 17–20)
+## 5. In-Depth Analysis: Event-Driven Security Auto-Remediation (Task 17)
+
+As part of Task 17, automated incident response capabilities are established to enforce continuous compliance against unauthorized security group rule modifications.
+
+### 5.1. Remediation Architecture & Execution Control Plane
+- **Detection Trigger:** AWS CloudTrail captures management write event `AuthorizeSecurityGroupIngress` across the AWS account and forwards audit events to the default Amazon EventBridge bus.
+- **Event Filter:** EventBridge rule `depi-sec-remediate-open-ssh` filters events matching source `aws.ec2` and event name `AuthorizeSecurityGroupIngress`.
+- **Target Invocation:** Directly triggers AWS Lambda function `depi-sec-auto-remediation` (Python 3.12 runtime) via resource-based invoke policy `AllowExecutionFromEventBridge`.
+
+### 5.2. Least-Privilege IAM Boundary
+The Lambda execution role (`depi-sec-lambda-remediation-role`) adheres strictly to least-privilege principles without wildcard administrative permissions:
+1. `ec2:DescribeSecurityGroups`: Allows querying security group rule definitions across the region (required because EC2 Describe APIs do not support resource-level permissions).
+2. `ec2:RevokeSecurityGroupIngress`: Scoped strictly to the target application security group ARN (`arn:aws:ec2:us-east-1:<account-id>:security-group/sg-045206e75cb53b510`). The function is cryptographically blocked by IAM from revoking rules on database, ALB, or external security groups.
+3. `sns:Publish`: Scoped strictly to the topic ARN `arn:aws:sns:us-east-1:<account-id>:depi-sec-alerts`.
+4. CloudWatch Logs: Scoped strictly to log group `/aws/lambda/depi-sec-auto-remediation:*`.
+
+### 5.3. Discrete CIDR Revocation vs. Rule Destruction
+- **Inspection Logic:** The Python handler inspects all `IpPermissions` on the security group for rules matching public IPv4 CIDR `0.0.0.0/0` on sensitive administrative ports: TCP 22 (SSH), TCP 3389 (RDP), overlapping ranges (e.g., 20–25, 3000–4000), or all-traffic protocol `-1`.
+- **Preservation of Legitimate Rules:** When a dangerous rule is identified, the revocation payload specifies **only** `IpRanges: [{"CidrIp": "0.0.0.0/0"}]` for that specific protocol and port range. Legitimate internal network CIDRs (e.g., `10.0.0.0/16`) and security group references (ALB SG on port 80) within the same rule set remain completely untouched.
+
+### 5.4. Defensive Race Conditions & Duplicate Event Handling
+- **Event Envelope Validation:** The handler validates the incoming EventBridge structure and ignores failed CloudTrail events containing `errorCode` or `errorMessage` (where no rules were actually added).
+- **Target Scoping:** The handler validates the security group ID against regex `^sg-[0-9a-fA-F]{8,17}$` and verifies against `TARGET_SECURITY_GROUP_ID`.
+- **Re-Inspection on Conflict:** If `ec2:RevokeSecurityGroupIngress` encounters `InvalidPermission.NotFound` (due to duplicate event delivery or concurrent remediation), the function re-describes the security group. If no dangerous rules remain, it confirms `ALREADY_CLEAN` and suppresses redundant SNS notifications; if dangerous rules remain, it logs `FAILED_DANGEROUS_RULES_REMAIN` without falsely reporting success.
+
+### 5.5. Observability, Latency & Scope Boundaries
+- **CloudTrail Delivery Window:** AWS CloudTrail delivers management events to EventBridge with an inherent delivery latency of approximately 30 to 60 seconds. Auto-remediation is a near-real-time compensating control rather than an inline packet firewall.
+- **Dedicated Log Group:** Execution logs are retained in `/aws/lambda/depi-sec-auto-remediation` with a 14-day retention window, logging structured JSON events without exposing sensitive credentials or raw CloudTrail request payloads.
+
+---
+
+## 6. Pending Security Controls (Tasks 18–20)
 
 The following controls represent outstanding project tasks that have not yet been implemented or deployed in Terraform:
 
 | Task | Control | Planned AWS Service | Planned Threat Mitigation | Current Status |
 | :--- | :--- | :--- | :--- | :--- |
-| **Task 17** | **Event-Driven Security Auto-Remediation** | AWS Lambda & EventBridge | Rogue security group rule modification opening port 22/3306 to `0.0.0.0/0`. | *Pending implementation in `lambda.tf`* |
 | **Task 18** | **Isolated Management Network (VPC Peering)** | AWS VPC Peering | Direct public access for operations; unsegmented administrative tools. | *Pending implementation in `peering.tf`* |
 | **Task 19** | **Immutable Ransomware-Resistant Backups** | AWS Backup (Vault Lock) | Ransomware deletion of snapshots, accidental administrator destruction of backups. | *Pending implementation in `backup.tf`* |
-| **Task 20** | **End-to-End Security Audit & Clean Destroy** | Terraform CLI & AWS Console | Unmonitored lingering infrastructure, resource leakage, cost overruns. | *Pending final execution after Tasks 17–19* |
+| **Task 20** | **End-to-End Security Audit & Clean Destroy** | Terraform CLI & AWS Console | Unmonitored lingering infrastructure, resource leakage, cost overruns. | *Pending final execution after Tasks 18–19* |
