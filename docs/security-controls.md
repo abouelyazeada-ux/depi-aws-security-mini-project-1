@@ -28,6 +28,8 @@ Unimplemented controls scheduled for **Tasks 19–20** are clearly designated as
 | **SEC-16** | **CloudWatch Alarms, Security Metric Filtering & Proactive Alerting** | Amazon CloudWatch & Amazon SNS | Delayed incident detection for compute CPU exhaustion, target health failure, database storage starvation, and brute-force console login attempts. | 5 CloudWatch metric alarms deployed: (1) `depi-sec-ec2-cpu-high-app-a` (>70%), (2) `depi-sec-ec2-cpu-high-app-b` (>70%), (3) `depi-sec-alb-unhealthy-hosts` (>0), (4) `depi-sec-rds-free-storage-low` (<2 GB), (5) `depi-sec-failed-console-logins-alarm` (>=3 in 5m via CloudTrail metric filter `{ ($.eventName = "ConsoleLogin") && ($.errorMessage = "Failed authentication") }`). Alerts delivered to `depi-sec-alerts` SNS topic. ALB alarm transition (`OK -> ALARM`), real email alert delivery, and recovery (`ALARM -> OK`) verified during Nginx test. Operational dashboard `depi-sec-overview` visualizes live metrics. | [`16-dashboard-overview.png`](../screenshots/16-cloudwatch/16-dashboard-overview.png)<br>[`16-alarm-unhealthy-hosts.png`](../screenshots/16-cloudwatch/16-alarm-unhealthy-hosts.png)<br>[`16-alarm-email-notification.png`](../screenshots/16-cloudwatch/16-alarm-email-notification.png) | **Verified** |
 | **SEC-17** | **Event-Driven Security Auto-Remediation** | AWS Lambda, EventBridge, CloudTrail & SNS | Rogue or accidental security group modification exposing sensitive ports (TCP 22 SSH, TCP 3389 RDP) to the public internet (`0.0.0.0/0`); zero-day exposure windows. | EventBridge rule `depi-sec-remediate-open-ssh` triggers on CloudTrail `AuthorizeSecurityGroupIngress`. Python 3.12 Lambda `depi-sec-auto-remediation` assumed by least-privilege role `depi-sec-lambda-remediation-role` (strictly scoped to `ec2:DescribeSecurityGroups`, `ec2:RevokeSecurityGroupIngress` on `depi-sec-app-sg`, and `sns:Publish` on `depi-sec-alerts`). Validates event, verifies `TARGET_SECURITY_GROUP_ID`, revokes only `0.0.0.0/0` (preserving port 80 from ALB SG and internal CIDRs), handles duplicate/conflict events via active rule re-inspection, logs structured telemetry, and dispatches incident alert email. | [`17-b-rule-removed.png`](../screenshots/17-lambda/17-b-rule-removed.png)<br>[`17-c-lambda-log.png`](../screenshots/17-lambda/17-c-lambda-log.png)<br>[`17-d-sns-email.png`](../screenshots/17-lambda/17-d-sns-email.png)<br>*(Note: `17-a-rule-added.png` omitted; rule remediated live before manual capture)* | **Verified** |
 | **SEC-18** | **Isolated Management Network (VPC Peering)** | AWS VPC Peering & Amazon EC2 | Direct public access for operations; unsegmented administrative tools; unauthorized ingress to application tier. | `depi-sec-tools-vpc` (`10.1.0.0/16`) connected via same-account VPC peering `pcx-066a78d3ee36e18f9`. Private route tables route inter-VPC traffic. `depi-sec-tools-sg` enforces discrete egress (TCP 80, TCP 443, ICMP to `10.0.11.0/24` & `10.0.12.0/24`). `depi-sec-private-nacl` enforces stateless rules 150–152 (inbound) and 150–151 (outbound ephemeral/ICMP reply). Keyless SSM management shares App VPC interface endpoints. | [`18-peering-active.png`](../screenshots/18-peering/18-peering-active.png)<br>[`18-app-route-table.png`](../screenshots/18-peering/18-app-route-table.png)<br>[`18-tools-route-table.png`](../screenshots/18-peering/18-tools-route-table.png)<br>[`18-peering-curl-success.png`](../screenshots/18-peering/18-peering-curl-success.png) | **Verified** |
+| **SEC-19** | **Immutable Ransomware-Resistant Backups (Vault Lock)** | AWS Backup | Ransomware encryption/extortion where attackers delete recovery points before executing payload; premature administrative deletion of backups. | `aws_backup_vault.backup_vault` (`depi-sec-vault`) + `aws_backup_vault_lock_configuration.vault_lock` in Governance Mode (`min_retention_days = 7`, `max_retention_days = 365`, `changeable_for_days` deliberately omitted) + `aws_backup_plan.backup_plan` (`cron(0 5 * * ? *)`, 30-day retention) + `aws_backup_selection.backup_selection` (`Project = depi-mini-project-1`). On-demand backup of EBS volume `vol-00fcab943dfdc091c` completed (job ID `07f99bc5-df7c-4124-8aa2-a9560997854f`, recovery point `snap-030ea42e05815a6e6`); deletion attempt via CLI rejected with `InvalidRequestException: RecoveryPoint cannot be deleted or updated (Backup vault configured with Lock)`. | [`19-backup-vault-locked.png`](../screenshots/19-backup/19-backup-vault-locked.png)<br>[`19-backup-job-completed.png`](../screenshots/19-backup/19-backup-job-completed.png)<br>[`19-recovery-point-delete-refused.png`](../screenshots/19-backup/19-recovery-point-delete-refused.png) | **Verified (Governance Lock & WORM Enforcement)** |
+
 
 ---
 
@@ -208,11 +210,51 @@ The Tools EC2 instance (`depi-sec-tools-instance`, `i-039ddfc570cb61341`) is man
 
 ---
 
-## 7. Pending Security Controls (Tasks 19–20)
+## 7. In-Depth Analysis: AWS Backup Vault Lock & Ransomware Defense (Task 19)
 
-The following controls represent outstanding project tasks that have not yet been implemented or deployed in Terraform:
+As part of Task 19, immutable backup protection was introduced to protect critical application data (EC2/EBS, EFS, and RDS) against destructive ransomware attacks and unauthorized deletion.
+
+### 7.1. Threat Model & Ransomware Defense
+In modern ransomware and insider threat scenarios, attackers who gain administrative or root credentials prioritize discovering and deleting recovery points and volume snapshots before encrypting primary storage. By deleting backups first, adversaries eliminate the victim's ability to restore systems without paying an extortion fee.
+
+**AWS Backup Vault Lock** establishes a Write-Once-Read-Many (WORM) storage policy on the backup vault (`depi-sec-vault`). Once configured, recovery points residing in the vault cannot be deleted or altered by any user—including IAM identities with `AdministratorAccess`—until their individual retention periods expire.
+
+### 7.2. Governance Mode vs Compliance Mode Safeguards
+AWS Backup provides two operational locking modes:
+1. **Compliance Mode:** Permanently irreversible once the mandatory grace period (`changeable_for_days >= 3`) elapses. In Compliance Mode, not even the root user or AWS Support can delete recovery points or remove the lock until retention expires.
+2. **Governance Mode:** Prevents premature deletion by standard administrative users while allowing authorized operators with specific permission (`backup:DeleteBackupVaultLockConfiguration`) to update or remove the lock.
+
+**Lab Safety Implementation Decision:**
+- To satisfy the primary directive of `Project-1.pdf` (*"Use governance mode only. Never use compliance mode in a learning account"*) and maintain clean lifecycle management, `backup.tf` configures `aws_backup_vault_lock_configuration` with **`changeable_for_days` deliberately omitted**.
+- Setting `min_retention_days = 7` and `max_retention_days = 365` enforces strict retention guardrails during active operations while ensuring the lab account is never locked into irreversible multi-week storage commitments.
+
+### 7.3. Empirical Deletion-Denial Analysis & API Error Attribution
+During empirical testing, an on-demand backup job (`07f99bc5-df7c-4124-8aa2-a9560997854f`) generated recovery point `arn:aws:ec2:us-east-1::snapshot/snap-030ea42e05815a6e6` for EBS volume `vol-00fcab943dfdc091c` (`depi-sec-app-a`).
+
+When administrator user `terraform-admin` (which holds full `AdministratorAccess`) attempted to delete the recovery point via AWS CLI, AWS Backup rejected the request:
+```text
+An error occurred (InvalidRequestException) when calling the DeleteRecoveryPoint operation: RecoveryPoint cannot be deleted or updated (Backup vault configured with Lock)
+```
+
+**Technical Significance of the Error:**
+- If the operator lacked IAM permissions, IAM would have failed first with `AccessDeniedException: User is not authorized to perform: backup:DeleteRecoveryPoint`.
+- Because `terraform-admin` holds administrator privileges, IAM authorization succeeded. The operation was evaluated and blocked directly by the **AWS Backup Vault Lock WORM engine**, returning `InvalidRequestException` referencing the active vault lock.
+- This confirms that immutability is enforced at the vault level, independent of IAM administrator rights.
+
+### 7.4. Task 20 Teardown Dependencies
+Because Terraform does not manage dynamically generated backup recovery points, executing `terraform destroy` directly on a vault containing recovery points results in `ResourceConflictException`. For Task 20:
+1. **Halt Scheduled Jobs:** Ensure no future scheduled backup runs trigger at `05:00 UTC`.
+2. **Review Recovery Points:** List and verify all recovery points in `depi-sec-vault`.
+3. **Remove Governance Lock (Requires Approval):** Run `aws backup delete-backup-vault-lock-configuration --backup-vault-name depi-sec-vault`.
+4. **Delete Test Recovery Points (Requires Approval):** Run `aws backup delete-recovery-point` for `snap-030ea42e05815a6e6`.
+5. **Terraform Destroy (Requires Approval):** Execute `terraform destroy` with an empty vault for a 100% clean teardown.
+
+---
+
+## 8. Pending Security Controls (Task 20)
+
+With the successful deployment and empirical verification of **Tasks 1–19**, only the final project teardown and billing reconciliation task remains:
 
 | Task | Control | Planned AWS Service | Planned Threat Mitigation | Current Status |
 | :--- | :--- | :--- | :--- | :--- |
-| **Task 19** | **Immutable Ransomware-Resistant Backups** | AWS Backup (Vault Lock) | Ransomware deletion of snapshots, accidental administrator destruction of backups. | *Pending implementation in `backup.tf`* |
 | **Task 20** | **End-to-End Security Audit & Clean Destroy** | Terraform CLI & AWS Console | Unmonitored lingering infrastructure, resource leakage, cost overruns. | *Pending final execution after Task 19* |

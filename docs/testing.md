@@ -19,7 +19,7 @@ Each test case details the operational procedure performed, the expected securit
 | **7** | Add SSH rule (`0.0.0.0/0:22`) to App SG | Security Auto-Remediation (Lambda & EventBridge) | Rogue rule removed by Lambda; HTTP port 80 preserved; CloudWatch log and SNS email received | Port 22 from `0.0.0.0/0` manually authorized on `depi-sec-app-sg`; EventBridge event triggered Lambda; CloudWatch logs confirmed `REMEDIATION_TRIGGERED`, `REMEDIATION_SUCCESS`, and `SNS_ALERT_PUBLISHED`; rule revoked; original HTTP port 80 rule remained intact; real SNS email alert received | **PASS (Automated Remediation Verified; Before Screenshot Omitted)** | [`17-b-rule-removed.png`](../screenshots/17-lambda/17-b-rule-removed.png)<br>[`17-c-lambda-log.png`](../screenshots/17-lambda/17-c-lambda-log.png)<br>[`17-d-sns-email.png`](../screenshots/17-lambda/17-d-sns-email.png) |
 | **8** | Stop Nginx web service on one instance | ALB Target Group (`depi-sec-tg`) & CloudWatch Alarms | Target marked Unhealthy; traffic routes to healthy target; CloudWatch alarm fires; alert email sent | `app-a` marked Unhealthy in console; traffic served by `app-b`; CloudWatch alarm `depi-sec-alb-unhealthy-hosts` transitioned to `ALARM`; real SNS alert email received; `depi-sec-overview` dashboard captured spike to 1 and recovery to 0; returned to Healthy | **PASS** | [`12-alb-unhealthy-target.png`](../screenshots/12-alb/12-alb-unhealthy-target.png)<br>[`12-alb-failover-working.png`](../screenshots/12-alb/12-alb-failover-working.png)<br>[`12-alb-recovered.png`](../screenshots/12-alb/12-alb-recovered.png)<br>[`16-alarm-unhealthy-hosts.png`](../screenshots/16-cloudwatch/16-alarm-unhealthy-hosts.png)<br>[`16-alarm-email-notification.png`](../screenshots/16-cloudwatch/16-alarm-email-notification.png)<br>[`16-dashboard-overview.png`](../screenshots/16-cloudwatch/16-dashboard-overview.png) |
 | **9** | Curl app server from peering tools VPC | VPC Peering Connection (`pcx-066a78d3ee36e18f9`) | HTTP 200 via private route | Executed `curl -s -o /dev/null -w "%{http_code}" http://10.0.11.161` from Tools EC2 (`i-039ddfc570cb61341`); returned HTTP 200 OK over private route via active peering connection; direct external ALB access returned HTTP 403 Forbidden | **PASS** | [`18-peering-active.png`](../screenshots/18-peering/18-peering-active.png)<br>[`18-app-route-table.png`](../screenshots/18-peering/18-app-route-table.png)<br>[`18-tools-route-table.png`](../screenshots/18-peering/18-tools-route-table.png)<br>[`18-peering-curl-success.png`](../screenshots/18-peering/18-peering-curl-success.png) |
-| **10** | Delete recovery point in locked backup vault | AWS Backup Vault Lock | Access Denied by Vault Lock | *Pending Task 19 Backup deployment* | **PENDING** | *Awaiting Task 19* |
+| **10** | Delete recovery point in locked backup vault | AWS Backup Vault Lock (`depi-sec-vault`) | Recovery point deletion refused by Vault Lock policy | On-demand backup job `07f99bc5-df7c-4124-8aa2-a9560997854f` completed 100% for EBS volume `vol-00fcab943dfdc091c` (attached to `depi-sec-app-a`), generating recovery point snapshot `snap-030ea42e05815a6e6` with 7-day retention in `depi-sec-vault`; deletion attempt via AWS CLI was refused with `InvalidRequestException: RecoveryPoint cannot be deleted or updated (Backup vault configured with Lock)` | **PASS** | [`19-backup-vault-locked.png`](../screenshots/19-backup/19-backup-vault-locked.png)<br>[`19-backup-job-completed.png`](../screenshots/19-backup/19-backup-job-completed.png)<br>[`19-recovery-point-delete-refused.png`](../screenshots/19-backup/19-recovery-point-delete-refused.png) |
 
 ---
 
@@ -272,11 +272,68 @@ Each test case details the operational procedure performed, the expected securit
 
 ---
 
-## Pending Security Test Cases (Tasks 19–20)
+### Test 10: AWS Backup Vault Lock Immutability (Task 19)
+- **Objective:** Verify that AWS Backup Vault Lock in Governance Mode enforces Write-Once-Read-Many (WORM) storage immutability, preventing premature deletion of backup recovery points before the configured minimum retention period expires.
+- **Empirical Evidence & Observed Procedure:**
+  1. AWS Backup Vault `depi-sec-vault` was provisioned with a Governance Mode Vault Lock (`min_retention_days = 7`, `max_retention_days = 365`, `changeable_for_days` deliberately omitted to ensure governance safeguards). Inspected in the AWS Backup Console: Status `Locked (Governance)`.
+  2. AWS Backup Plan `depi-sec-backup-plan` was provisioned with rule `depi-sec-daily-backup-rule` scheduled at `cron(0 5 * * ? *)` with 30-day retention and 60-minute start window. Backup selection `depi-sec-backup-selection` targeted tag `Project = depi-mini-project-1`.
+  3. An on-demand backup job was initiated targeting EBS volume `vol-00fcab943dfdc091c` (root disk of `depi-sec-app-a`) with a 7-day retention period:
+     - **Backup Job ID:** `07f99bc5-df7c-4124-8aa2-a9560997854f`
+     - **Resource Type:** EBS
+     - **Resource ARN:** `arn:aws:ec2:us-east-1:882034443616:volume/vol-00fcab943dfdc091c`
+     - **Source EC2 Instance:** `depi-sec-app-a`
+     - **Status:** `COMPLETED` (100% progress)
+     - **Generated Recovery Point:** `arn:aws:ec2:us-east-1::snapshot/snap-030ea42e05815a6e6`
+     - **Scheduled Retention End:** 2026-10-26
+  4. Using administrator credentials with full `backup:DeleteRecoveryPoint` permissions (`terraform-admin`), an explicit deletion request was executed via the AWS CLI:
+     ```bash
+     aws backup delete-recovery-point \
+       --backup-vault-name depi-sec-vault \
+       --recovery-point-arn "arn:aws:ec2:us-east-1::snapshot/snap-030ea42e05815a6e6"
+     ```
+  5. The AWS Backup service evaluated the active Vault Lock and rejected the API operation:
+     ```text
+     An error occurred (InvalidRequestException) when calling the DeleteRecoveryPoint operation: RecoveryPoint cannot be deleted or updated (Backup vault configured with Lock)
+     ```
+     *Observed Error Distinction:* The API response was `InvalidRequestException` (Backup vault configured with Lock), definitively confirming that the deletion block was enforced by the Vault Lock WORM engine rather than an IAM permission failure.
+- **Expected Outcome:** Recovery point deletion is blocked and rejected by the Backup Vault Lock policy.
+- **Actual Result:** The deletion attempt was refused with `InvalidRequestException: RecoveryPoint cannot be deleted or updated (Backup vault configured with Lock)`, demonstrating immutability and anti-ransomware protection.
+- **Status:** **PASS**
+- **Screenshots:**
+  - [`19-backup-vault-locked.png`](../screenshots/19-backup/19-backup-vault-locked.png) — AWS Backup Console displaying `depi-sec-vault` with Status `Locked (Governance)`, Min retention `7 days`, and Max retention `365 days`.
+  - [`19-backup-job-completed.png`](../screenshots/19-backup/19-backup-job-completed.png) — AWS Backup Jobs Console displaying backup job `07f99bc5-df7c-4124-8aa2-a9560997854f` in `Completed` status with 100% progress.
+  - [`19-recovery-point-delete-refused.png`](../screenshots/19-backup/19-recovery-point-delete-refused.png) — Terminal output showing the CLI deletion attempt refused with `InvalidRequestException: RecoveryPoint cannot be deleted or updated (Backup vault configured with Lock)`.
 
-The remaining test case from Task 20 requires components scheduled for subsequent project tasks:
+---
 
-- **Test 10: AWS Backup Vault Lock Immutability (Task 19)**
-  - *Procedure:* Attempt to delete a backup recovery point inside the locked vault using root/admin credentials.
-  - *Expected Result:* AWS Backup rejects the deletion with `AccessDeniedException` due to Vault Lock policy.
-  - *Status:* **Pending Task 19 implementation.**
+## 3. Task 20 Teardown Dependencies & Pre-Destroy Cleanup Protocol
+
+Before executing `terraform destroy` for Task 20, the following strict dependency sequence must be observed to prevent failed destroy operations and lingering costs:
+
+1. **Stop Future Scheduled Backup Jobs:** To prevent unexpected backup jobs from triggering at `05:00 UTC`, ensure teardown occurs prior to the schedule or disable the backup rule in `depi-sec-backup-plan`.
+2. **Review Existing Backup Jobs & Recovery Points:** Inspect `depi-sec-vault` to catalog all existing recovery points and confirm no unmanaged backups exist:
+   ```bash
+   aws backup list-recovery-points-by-backup-vault --backup-vault-name depi-sec-vault
+   ```
+3. **Remove Governance Vault Lock (Requires Explicit Approval):** Because `depi-sec-vault` is locked in Governance Mode (with `changeable_for_days` deliberately omitted), an authorized administrator can remove the lock configuration prior to cleanup:
+   ```bash
+   aws backup delete-backup-vault-lock-configuration --backup-vault-name depi-sec-vault
+   ```
+4. **Delete Test Recovery Points (Requires Explicit Approval):** AWS Backup blocks vault deletion if any recovery points remain inside (`ResourceConflictException: Backup vault cannot be deleted. There are recovery points in this backup vault`). Delete only explicitly identified test recovery points:
+   ```bash
+   aws backup delete-recovery-point \
+     --backup-vault-name depi-sec-vault \
+     --recovery-point-arn "arn:aws:ec2:us-east-1::snapshot/snap-030ea42e05815a6e6"
+   ```
+5. **Perform Terraform Destroy (Requires Reviewed Plan & Explicit Approval):** Only after the vault is completely empty and S3 buckets are cleared of all object versions can `terraform destroy` run cleanly to remove all infrastructure.
+
+---
+
+## 4. Pending Security Test Cases (Task 20)
+
+With the successful completion and empirical verification of **Tasks 1–19**, all ten security tests in the standardized matrix are verified. The sole remaining deliverable is:
+
+- **Task 20: Clean Platform Teardown & Post-Destroy Billing Verification**
+  - *Procedure:* Execute S3 version purges, AWS Backup recovery point cleanup, Governance Vault Lock removal, `terraform destroy`, and final Cost Explorer verification.
+  - *Expected Result:* Zero resources remaining in AWS account; Cost Explorer confirms clean teardown.
+  - *Status:* **Pending Final Execution (Task 20).**

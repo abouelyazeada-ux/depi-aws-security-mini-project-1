@@ -323,12 +323,7 @@ The `depi-sec-private-nacl` is explicitly associated with private subnets (`depi
    - **App VPC Private Route Table (`depi-sec-private-rt`):** Routes destination CIDR `10.1.0.0/16` targeting peering connection `pcx-066a78d3ee36e18f9`.
    - **Tools VPC Route Table (`depi-sec-tools-rt`):** Routes destination CIDR `10.0.0.0/16` targeting peering connection `pcx-066a78d3ee36e18f9`.
 4. **Least-Privilege Security Group Egress Controls:**
-   - Compute instance `depi-sec-tools-instance` (`i-039ddfc570cb61341`) attaches security group `depi-sec-tools-sg`.
-   - Egress rules strictly prohibit public internet access and are granularly scoped:
-     - TCP port 80 to `depi-sec-private-a` (`10.0.11.0/24`) and `depi-sec-private-b` (`10.0.12.0/24`).
-     - TCP port 443 to `depi-sec-private-a` (`10.0.11.0/24`) and `depi-sec-private-b` (`10.0.12.0/24`) (for shared SSM endpoints).
-     - ICMP ping (`-1/-1`) to `depi-sec-private-a` (`10.0.11.0/24`) and `depi-sec-private-b` (`10.0.12.0/24`).
-5. **Bidirectional Stateless Network ACL Enforcement (`depi-sec-private-nacl`):**
+   - Compute instance `depi-sec-tools-instance` (`i-039d5. **Bidirectional Stateless Network ACL Enforcement (`depi-sec-private-nacl`):**
    - Because `depi-sec-private-nacl` is stateless, least-privilege rules accommodate peering traffic explicitly:
      - **Inbound Rules:** Rule 150 (TCP 80 from `10.1.1.0/24`), Rule 151 (ICMP from `10.1.1.0/24`), Rule 152 (TCP 443 from `10.1.1.0/24`).
      - **Outbound Rules:** Rule 150 (TCP 1024–65535 to `10.1.1.0/24` for ephemeral socket replies), Rule 151 (ICMP to `10.1.1.0/24` for Echo Reply).
@@ -336,6 +331,23 @@ The `depi-sec-private-nacl` is explicitly associated with private subnets (`depi
    - Rather than provisioning three additional interface endpoints in `tools_vpc` (which would accrue ~$21.60/month in hourly endpoint fees), `depi-sec-tools-instance` reuses the existing PrivateLink endpoints in `app_vpc` across the peering connection.
    - At launch, `user_data` dynamically resolves the private IP addresses of the SSM endpoints via their official AWS VPCE DNS names (`aws_vpc_endpoint.*.dns_entry[0].dns_name`), maps them to canonical hostnames (`ssm.us-east-1.amazonaws.com`, `ssmmessages`, `ec2messages`) in `/etc/hosts`, and restarts the SSM agent.
    - Because canonical hostnames match the endpoint's public TLS certificate SAN, secure TLS validation succeeds natively without recurring endpoint charges.
+
+### 7.9. Immutable Backup Architecture & Governance Vault Lock (Task 19)
+1. **Architectural Scope & Placement:**
+   - In accordance with Task 19, centralized backup automation and ransomware immutability are established via AWS Backup in `us-east-1`.
+   - The backup architecture consists of integrated components defined in `terraform/backup.tf`:
+     - **Backup Vault (`depi-sec-vault`):** A centralized encrypted storage container for recovery points using default AWS-managed KMS encryption (`aws/backup`).
+     - **Backup Vault Lock Configuration:** Enforces Write-Once-Read-Many (WORM) storage immutability in **Governance Mode** with `min_retention_days = 7` and `max_retention_days = 365`. The `changeable_for_days` parameter is deliberately omitted to prevent accidental, unremovable Compliance Mode locking in an educational environment.
+     - **Backup Plan (`depi-sec-backup-plan`):** Defines automated scheduled backups via rule `depi-sec-daily-backup-rule` running daily at `05:00 UTC` (`cron(0 5 * * ? *)`) with `delete_after = 30` (30-day retention), a 60-minute start window, and a 120-minute completion window.
+     - **Backup Selection (`depi-sec-backup-selection`):** Evaluates tagged resources across all opted-in service types in `us-east-1` matching `Project = "depi-mini-project-1"`.
+2. **IAM Delegation & Least Privilege:**
+   - AWS Backup assumes service role `depi-sec-backup-role` (`backup.amazonaws.com`).
+   - The role attaches two AWS managed policies:
+     - `arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForBackup`: Grants permissions to describe, snapshot, and tag protected EC2, EBS, RDS, and EFS resources.
+     - `arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForRestores`: Grants permissions required to execute data recovery workflows.
+3. **Governance Mode Safety & WORM Enforcement:**
+   - While the Vault Lock is active, any attempt to delete recovery points before their retention expires (even by administrative identities) is intercepted and rejected by AWS Backup with `InvalidRequestException: RecoveryPoint cannot be deleted or updated (Backup vault configured with Lock)`.
+   - Because Governance Mode is enforced, an authorized administrator retains the ability to remove the vault lock via `backup:DeleteBackupVaultLockConfiguration`, ensuring clean teardown during project decommissioning (Task 20) without permanent lock-in.
 
 ---
 
@@ -379,3 +391,6 @@ As required by the project specifications, the architecture incorporates educati
 | **Tools Subnet (`depi-sec-tools-a`)** | Private (`10.1.1.0/24`, `us-east-1a`) | Hosts the monitoring instance without public IP assignment or internet gateway routes, enforcing zero-trust isolation. |
 | **VPC Peering (`pcx-066a78d3ee36e18f9`)** | Intra-Region (`us-east-1`) | Direct point-to-point private network link between Tools VPC and App VPC over private AWS fiber with zero data transfer fees within the same AZ (`us-east-1a`). |
 | **Tools Monitoring Instance (`depi-sec-tools-instance`)** | Private Subnet (`10.1.1.0/24`) | Out-of-band `t3.micro` monitoring instance (`i-039ddfc570cb61341`) managed via SSM, executing automated and interactive diagnostic verification of application health. |
+| **AWS Backup Vault (`depi-sec-vault`)** | Regional (`us-east-1`) | Encrypted, WORM-protected backup vault enforcing Governance Mode immutability (7–365 day retention) against ransomware and accidental deletion. |
+| **AWS Backup Plan (`depi-sec-backup-plan`)** | Regional (`us-east-1`) | Orchestrates automated daily backups at 05:00 UTC with 30-day lifecycle retention targeting resources tagged `Project = depi-mini-project-1`. |
+| **AWS Backup IAM Role (`depi-sec-backup-role`)** | Global / IAM | Least-privilege service role assumed by `backup.amazonaws.com` with managed backup and restore execution policies. |
