@@ -7,6 +7,10 @@ Public user traffic is accelerated and secured at the perimeter via an AWS Cloud
 In-depth security controls include tiered security group chaining, stateless Network ACLs, AWS Systems Manager keyless administration, S3 Block Public Access, and dedicated private management isolation via a non-transitive VPC Peering connection linking an isolated Tools VPC to the application tier.
 Centralized governance incorporates automated AWS Budgets cost alerts, Secrets Manager credential management, multi-region AWS CloudTrail auditing, CloudWatch Standard Logging v2, VPC Flow Logs network traffic capture, proactive CloudWatch metric alarms, a unified operations dashboard backed by Amazon SNS email alerts, and event-driven automated security remediation via Amazon EventBridge and AWS Lambda.
 
+> [!IMPORTANT]
+> **Project Completion & Infrastructure Status Notice:**
+> All 20 project tasks (Tasks 1–20) have been completed, empirically verified, and documented. As part of **Task 20 (Final Security Audit & Clean Destroy)**, all 141 provisioned infrastructure resources were cleanly destroyed via Terraform and verified via the AWS CLI to eliminate running costs. All Terraform code in this repository remains 100% reproducible and ready for deployment. The architecture diagrams and configuration documentation describe the fully validated, deployed state of the platform.
+
 ---
 
 ## 2. Architecture diagram
@@ -144,6 +148,7 @@ Administrative isolation is enforced through a dedicated **Tools VPC** (`depi-se
 | **SEC-17** | Event-Driven Security Auto-Remediation | AWS Lambda / EventBridge / SNS | Inadvertent or malicious public security group rule exposure; Lambda automatically revokes 0.0.0.0/0 on port 22/3389 within seconds and dispatches SNS alert | [17-b-rule-removed.png](screenshots/17-lambda/17-b-rule-removed.png) | **Verified (Before Screenshot Omitted)** |
 | **SEC-18** | Isolated Management Network (VPC Peering) | AWS VPC Peering / EC2 / NACL | Public exposure of administrative management planes; non-transitive peering links isolated Tools VPC to app private subnets with least-privilege SG egress and stateless NACL rules | [18-peering-curl-success.png](screenshots/18-peering/18-peering-curl-success.png)<br>[18-peering-active.png](screenshots/18-peering/18-peering-active.png) | **Verified** |
 | **SEC-19** | Immutable Ransomware-Resistant Backups | AWS Backup (Vault Lock) | Ransomware deletion of snapshots, premature administrative destruction; WORM lock in Governance Mode (7–365d retention); deletion refused with InvalidRequestException | [19-backup-vault-locked.png](screenshots/19-backup/19-backup-vault-locked.png)<br>[19-backup-job-completed.png](screenshots/19-backup/19-backup-job-completed.png)<br>[19-recovery-point-delete-refused.png](screenshots/19-backup/19-recovery-point-delete-refused.png) | **Verified** |
+| **SEC-20** | Clean Teardown & Post-Destroy Security Audit | Terraform / AWS CLI | Unmonitored lingering infrastructure, resource leakage, cost overruns | State empty; 141 resources destroyed; all EC2, RDS, S3, CloudFront, Backup, CloudTrail verified absent; Cost Explorer verified | **Verified (Clean Teardown)** |
 
 
 > Comprehensive threat model analyses and controls descriptions are available in [docs/security-controls.md](docs/security-controls.md).
@@ -228,7 +233,7 @@ Terraform will display the provisioned endpoints upon successful completion:
 
 ## 7. How to verify
 
-Verification follows the standardized 10-test protocol defined in Task 20. Completed tests (Tasks 1–19) have been empirically verified and are documented below strictly based on observed evidence. The final clean destroy and billing verification (Task 20) is pending execution.
+Verification follows the standardized test framework defined in Task 20. All 20 project tasks and 10 security verification tests have been empirically validated and are documented below strictly based on observed evidence. Following the operational validation of Tasks 1–19, Task 20 (Clean Teardown & Final Security Audit) was executed, destroying all 141 resources and auditing the AWS environment to zero residual footprint.
 
 | # | Test Action | Expected Result | Verified Result | Status | Screenshot Link |
 | :-: | :--- | :--- | :--- | :-: | :--- |
@@ -242,6 +247,7 @@ Verification follows the standardized 10-test protocol defined in Task 20. Compl
 | **8** | Stop Nginx on one application instance | ALB marks Unhealthy; site up; alarm fires | Target group registered `app-a` Unhealthy; traffic served by `app-b`; CloudWatch alarm `depi-sec-alb-unhealthy-hosts` transitioned to `ALARM`; real SNS alert email received; `depi-sec-overview` dashboard captured spike to 1 and recovery to 0; recovered to Healthy | **PASS** | [12-alb-unhealthy-target.png](screenshots/12-alb/12-alb-unhealthy-target.png)<br>[16-alarm-unhealthy-hosts.png](screenshots/16-cloudwatch/16-alarm-unhealthy-hosts.png)<br>[16-alarm-email-notification.png](screenshots/16-cloudwatch/16-alarm-email-notification.png) |
 | **9** | Curl app server from peering tools VPC | HTTP 200 across peering link | Tools EC2 (`i-039ddfc570cb61341`) reached App A (`10.0.11.161`) over peering `pcx-066a78d3ee36e18f9`; returned HTTP 200 OK rendering `depi-sec-app-a`; direct external access without CloudFront header blocked (403) | **PASS** | [18-peering-active.png](screenshots/18-peering/18-peering-active.png)<br>[18-app-route-table.png](screenshots/18-peering/18-app-route-table.png)<br>[18-tools-route-table.png](screenshots/18-peering/18-tools-route-table.png)<br>[18-peering-curl-success.png](screenshots/18-peering/18-peering-curl-success.png) |
 | **10** | Delete recovery point in locked vault | Blocked by Vault Lock policy | On-demand backup job `07f99bc5-df7c-4124-8aa2-a9560997854f` completed 100% for EBS volume `vol-00fcab943dfdc091c` (`depi-sec-app-a`), creating recovery point `snap-030ea42e05815a6e6` with 7-day retention; deletion via AWS CLI was refused with `InvalidRequestException: RecoveryPoint cannot be deleted or updated (Backup vault configured with Lock)` | **PASS** | [19-backup-vault-locked.png](screenshots/19-backup/19-backup-vault-locked.png)<br>[19-backup-job-completed.png](screenshots/19-backup/19-backup-job-completed.png)<br>[19-recovery-point-delete-refused.png](screenshots/19-backup/19-recovery-point-delete-refused.png) |
+| **11** | Final Security Audit & Clean Destroy (Task 20) | All 141 resources cleanly destroyed; 0 state; empty residual cloud footprint | `terraform destroy` completed (141 destroyed); `state list` empty; all 3 EC2 instances terminated; RDS `DBInstanceNotFound`; S3 buckets absent (4,658 versions purged from logs bucket); CloudFront `NoSuchDistribution`; Backup vault/plan removed; trail and logs delivery removed; October 2026 Cost Explorer `UnblendedCost = -0.000000369 USD` (`Estimated=true`) | **PASS** | Documented in [docs/testing.md](docs/testing.md) |
 
 > For comprehensive step-by-step procedures and testing logs, consult [docs/testing.md](docs/testing.md).
 
@@ -471,6 +477,18 @@ Building secure cloud platforms requires understanding which services incur hour
 - At **90% actual spend ($9.00)**, an automated IAM Budget Action attaches `depi-sec-deny-expensive` to developer groups, immediately blocking any creation of new EC2 or RDS instances.
 - **Critical Cost Distinction (Alerts vs Hard Spending Limits):** A $10 budget in AWS is a tracking and alerting tool, not a hard spending cap. AWS Budgets does not shut down or terminate running resources when the threshold is reached. Running EC2 instances, Application Load Balancers, RDS instances, and VPC Interface Endpoints continue to accrue hourly charges regardless of budget alerts until explicitly stopped or destroyed using `terraform destroy`.
 
+### Post-Destroy Cost Explorer Audit & Billing Limitations (Task 20)
+Following the completion of all functional and security tests, a complete teardown was executed:
+- **October 2026 Cost Explorer Audit:** Total `UnblendedCost = -0.000000369 USD` (`Estimated=true`).
+- **Service-Level Cost Query:** Returned no rows above the reporting threshold.
+
+> [!WARNING]
+> **Billing Telemetry Limitations & Delayed Charges:**
+> A zero or negative query in AWS Cost Explorer immediately following resource teardown **must not be interpreted as a final zero bill**:
+> 1. **Aggregation Latency:** AWS Cost Explorer exhibits an inherent 24- to 48-hour delay in ingesting, processing, and aggregating usage records across service metering pipelines.
+> 2. **Trailing Usage Records:** Final metrics, such as CloudWatch Logs ingestion, CloudTrail event auditing, S3 API requests, and fractional hourly compute/endpoint uptime incurred prior to destruction, require up to 48 hours to finalize in billing reports.
+> 3. **Operational Recommendation:** Operators should perform follow-up billing reviews 48–72 hours after teardown and upon final monthly invoice close to verify that all charges have ceased.
+
 ---
 
 ## 10. How to destroy
@@ -491,12 +509,13 @@ aws s3api delete-objects --bucket "$LOGS_BUCKET" \
   --delete "$(aws s3api list-object-versions --bucket "$LOGS_BUCKET" --query='{Objects: Versions[].{Key:Key,VersionId:VersionId}}')"
 ```
 
-### Step 2: Run Terraform Destroy
+### Step 2: Pre-Destroy Cleanup & Terraform Destroy (Task 20 Protocol)
 Execute Terraform destroy from the `terraform/` directory:
 ```bash
 terraform destroy
 ```
-Review the proposed destruction plan (confirming removal of CloudFront, ALB, RDS, EC2, VPC Endpoints, and IAM roles) and type `yes`.
+**Observed Result:** `Destroy complete! Resources: 141 destroyed.`
+**State Verification:** `terraform state list` returned empty (0 resources).
 
 ### Pre-Destroy Cleanup Dependency for AWS Backup (Task 20 Protocol):
 Before executing `terraform destroy`, AWS Backup recovery points and Vault Lock must be addressed in a strict sequence to prevent `ResourceConflictException`:
@@ -513,13 +532,15 @@ Before executing `terraform destroy`, AWS Backup recovery points and Vault Lock 
    ```
 4. **Execute `terraform destroy`:** With the vault emptied and S3 versions cleared, run `terraform destroy` for a completely clean removal.
 
-### Step 3: Verify Clean Console
-Open the AWS Management Console in `us-east-1` and verify that the following dashboards are completely clear:
-- **EC2 Console:** 0 running instances, 0 load balancers, 0 target groups.
-- **RDS Console:** 0 DB instances.
+### Step 3: Post-Destroy Verification & Clean Console Audit
+Verified via AWS CLI and AWS Management Console in `us-east-1` that all infrastructure was removed:
+- **EC2:** All 3 compute instances (`depi-sec-app-a`, `depi-sec-app-b`, `depi-sec-tools-instance`) confirmed in `terminated` state. 0 running instances, 0 load balancers, 0 target groups.
+- **RDS:** `depi-sec-db` returned `DBInstanceNotFound` (0 DB instances).
 - **VPC Console:** 0 endpoints, 0 custom VPCs.
-- **CloudFront Console:** 0 distributions.
-- **AWS Backup Console:** 0 backup vaults, 0 backup plans.
+- **CloudFront:** Distribution `EWLIRFI7B2MBM` returned `NoSuchDistribution` (0 distributions).
+- **AWS Backup:** Vault `depi-sec-vault` removed (confirmed empty prior to removal); backup plan and selection removed.
+- **CloudTrail:** Trail `depi-sec-trail` removed; CloudFront logs delivery removed.
+- **S3:** Buckets `depi-sec-app-75d8770a` and `depi-sec-logs-75d8770a` confirmed absent from `list-buckets` (4,658 object versions cleared from logs bucket with 0 errors).
 
 ---
 
@@ -541,12 +562,13 @@ Open the AWS Management Console in `us-east-1` and verify that the following das
 14. **Event-driven automated remediation dramatically shrinks threat exposure windows.** Traditional security operations rely on scheduled audits or manual triage, leaving unauthorized firewall modifications exposed for hours or days. Chaining CloudTrail API events through Amazon EventBridge to targeted AWS Lambda functions enables near-real-time automated response that revokes unauthorized public CIDRs (`0.0.0.0/0`) within seconds while preserving legitimate internal rules.
 15. **VPC Peering provides non-transitive isolation but requires strict bidirectional stateless firewall coordination.** Unlike Transit Gateway which centralizes hub-and-spoke routing, VPC peering establishes direct, point-to-point network links without transitivity (preventing accidental routing loops or lateral perimeter bridging). However, routing packets across VPCs is only half the battle: stateless Network ACLs must explicitly permit forward traffic on sensitive destination ports (80, 443, ICMP) *and* return traffic on client ephemeral ports (1024–65535), reinforcing the principle that Layer 3 route reachability is useless without Layer 4 packet-filter alignment.
 16. **Immutable backups (WORM) neutralize ransomware threats but require careful mode selection in educational labs.** Vault Lock prevents malicious actors from deleting snapshots before encrypting primary storage. Deploying in **Governance Mode** (omitting `changeable_for_days`) provides genuine Write-Once-Read-Many protection against standard administrative users while preserving the ability of authorized engineers to unlock and delete recovery points during planned decommissioning. Confirmed via empirical testing that AWS Backup rejects premature deletion with `InvalidRequestException: RecoveryPoint cannot be deleted or updated (Backup vault configured with Lock)`, demonstrating that immutability is enforced directly at the vault storage layer rather than via IAM permission denials.
+17. **Clean cloud decommissioning requires careful dependency unwinding and proactive state verification.** Destroying complex architectures cannot always be executed in a single blind command. Persistent storage with deletion protections (such as S3 buckets with thousands of versioned objects and delete markers) and immutability controls (such as AWS Backup Governance Vault Locks and protected recovery points) must be intentionally unlocked and purged prior to running `terraform destroy`. Furthermore, post-destroy verification using automated CLI queries across every provisioned service (EC2, RDS, VPC, CloudFront, Backup, CloudTrail, S3) is essential to eliminate "orphan" resources and prevent unexpected ongoing costs.
 
 ---
 
 ## 12. Known limitations
 
-While the platform implements rigorous security controls for completed Tasks 1–19, several known architectural limitations exist that should be addressed in a production deployment:
+While the platform implements rigorous security controls across all 20 completed tasks, several known architectural limitations exist that should be addressed in a production deployment:
 
 1. **Unencrypted HTTP Between CloudFront and Application Load Balancer:**
    - *Limitation:* The CloudFront origin protocol policy is set to `http-only` on port 80 as mandated by the educational project scope.
@@ -568,5 +590,6 @@ While the platform implements rigorous security controls for completed Tasks 1�
 6. **CloudTrail Event Delivery Latency in Auto-Remediation:**
    - *Limitation:* EventBridge triggers from CloudTrail management events (`AuthorizeSecurityGroupIngress`). AWS CloudTrail delivers events to EventBridge with an inherent service latency typically between 30 and 60 seconds. Auto-remediation is near-real-time rather than synchronous inline blocking.
    - *Scope Limitation:* The Lambda execution policy and function logic strictly target the application security group (`depi-sec-app-sg`). Non-target security groups in the account are not automatically remediated under this specific function scope.
-7. **Outstanding Project Task (Task 20):**
-   - Tasks 1–19 are fully deployed, verified, and documented. Only the final clean destroy and billing verification (Task 20) remains pending execution.
+7. **Billing Telemetry Aggregation Latency & Delayed Charges:**
+   - While all 20 tasks are fully executed, all 141 resources destroyed, and the environment confirmed at zero residual footprint, AWS Cost Explorer operates with an inherent 24–48 hour aggregation latency.
+   - The initial post-destroy query reported `-0.000000369 USD` (`Estimated=true`) with no rows above threshold at the service level. This should not be interpreted as a final zero invoice, as delayed metric processing, API requests, and final prorated hours may be billed in the following cycle.

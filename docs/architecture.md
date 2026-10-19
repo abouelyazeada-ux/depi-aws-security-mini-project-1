@@ -1,6 +1,12 @@
 # Cloud Infrastructure Architecture — Secure AWS Web Platform
 
-This document provides a comprehensive technical breakdown of the multi-tier, multi-AZ cloud architecture implemented for DEPI Mini Project 1. It details the network topology, routing architecture, component placement rationale, data flows, and security boundaries across **Tasks 1–18**.
+This document provides a comprehensive technical breakdown of the multi-tier, multi-AZ cloud architecture designed and implemented for DEPI Mini Project 1. It details the network topology, routing architecture, component placement rationale, data flows, and security boundaries across **Tasks 1–20**.
+
+> [!IMPORTANT]
+> **Architecture vs. Current Cloud Infrastructure State:**
+> This document details the complete production-grade cloud architecture as designed, provisioned, and empirically validated across Tasks 1–19. In compliance with **Task 20 (Final Security Audit & Clean Destroy)**, all 141 provisioned AWS infrastructure resources were systematically decommissioned and destroyed via Terraform, leaving the AWS environment with **zero active running resources** and zero ongoing charges.
+>
+> The entire architecture remains 100% reproducible and codified within the `terraform/` directory. All configurations, routing tables, and security controls described herein reflect the tested and verified deployment state and can be re-provisioned on demand via `terraform apply`.
 
 ---
 
@@ -323,7 +329,8 @@ The `depi-sec-private-nacl` is explicitly associated with private subnets (`depi
    - **App VPC Private Route Table (`depi-sec-private-rt`):** Routes destination CIDR `10.1.0.0/16` targeting peering connection `pcx-066a78d3ee36e18f9`.
    - **Tools VPC Route Table (`depi-sec-tools-rt`):** Routes destination CIDR `10.0.0.0/16` targeting peering connection `pcx-066a78d3ee36e18f9`.
 4. **Least-Privilege Security Group Egress Controls:**
-   - Compute instance `depi-sec-tools-instance` (`i-039d5. **Bidirectional Stateless Network ACL Enforcement (`depi-sec-private-nacl`):**
+   - Compute instance `depi-sec-tools-instance` (`i-039ddfc570cb61341`) security group `depi-sec-tools-sg` restricts outbound traffic strictly to destination ports 80, 443, and ICMP targeting private app subnets `10.0.11.0/24` and `10.0.12.0/24`. All other outbound internet and VPC destinations are dropped.
+5. **Bidirectional Stateless Network ACL Enforcement (`depi-sec-private-nacl`):**
    - Because `depi-sec-private-nacl` is stateless, least-privilege rules accommodate peering traffic explicitly:
      - **Inbound Rules:** Rule 150 (TCP 80 from `10.1.1.0/24`), Rule 151 (ICMP from `10.1.1.0/24`), Rule 152 (TCP 443 from `10.1.1.0/24`).
      - **Outbound Rules:** Rule 150 (TCP 1024–65535 to `10.1.1.0/24` for ephemeral socket replies), Rule 151 (ICMP to `10.1.1.0/24` for Echo Reply).
@@ -348,6 +355,22 @@ The `depi-sec-private-nacl` is explicitly associated with private subnets (`depi
 3. **Governance Mode Safety & WORM Enforcement:**
    - While the Vault Lock is active, any attempt to delete recovery points before their retention expires (even by administrative identities) is intercepted and rejected by AWS Backup with `InvalidRequestException: RecoveryPoint cannot be deleted or updated (Backup vault configured with Lock)`.
    - Because Governance Mode is enforced, an authorized administrator retains the ability to remove the vault lock via `backup:DeleteBackupVaultLockConfiguration`, ensuring clean teardown during project decommissioning (Task 20) without permanent lock-in.
+
+### 7.10. Clean Infrastructure Decommissioning & Audit Architecture (Task 20)
+1. **Decommissioning Workflow & Resource Dependencies:**
+   - Decommissioning a defense-in-depth architecture requires resolving critical resource dependency chains before executing declarative teardown:
+     - **AWS Backup Recovery Point Deletion:** AWS Backup blocks vault deletion (`ResourceConflictException`) if recovery points exist inside. The active test recovery point (`snap-030ea42e05815a6e6`) was deleted after removing the Governance Vault Lock.
+     - **S3 Bucket Version & Delete Marker Purging:** S3 prevents bucket deletion if object versions remain. The central logging bucket (`depi-sec-logs-75d8770a`) had 4,658 object versions systematically purged with zero errors, resulting in zero versions and zero delete markers.
+     - **Declarative Resource Destruction:** `terraform destroy` successfully destroyed all 141 managed infrastructure resources across edge, compute, database, storage, networking, governance, and IAM tiers.
+2. **Post-Destroy Audit & Verification:**
+   - Post-destroy validation queries verified that no orphaned resources remained in the target account and region (`us-east-1`):
+     - `terraform state list`: Confirmed empty (0 resources).
+     - EC2: All 3 compute instances (`depi-sec-app-a`, `depi-sec-app-b`, `depi-sec-tools-instance`) transitioned to `terminated`.
+     - RDS: Database instance `depi-sec-db` returned `DBInstanceNotFound`.
+     - S3: Buckets `depi-sec-app-75d8770a` and `depi-sec-logs-75d8770a` confirmed absent from `list-buckets`.
+     - CloudFront: Distribution `EWLIRFI7B2MBM` returned `NoSuchDistribution`.
+     - AWS Backup: Selection, Plan, Governance Vault Lock, and Vault completely removed.
+     - CloudTrail & CloudWatch: Trail `depi-sec-trail` and CloudFront logs delivery removed and verified.
 
 ---
 
@@ -394,3 +417,25 @@ As required by the project specifications, the architecture incorporates educati
 | **AWS Backup Vault (`depi-sec-vault`)** | Regional (`us-east-1`) | Encrypted, WORM-protected backup vault enforcing Governance Mode immutability (7–365 day retention) against ransomware and accidental deletion. |
 | **AWS Backup Plan (`depi-sec-backup-plan`)** | Regional (`us-east-1`) | Orchestrates automated daily backups at 05:00 UTC with 30-day lifecycle retention targeting resources tagged `Project = depi-mini-project-1`. |
 | **AWS Backup IAM Role (`depi-sec-backup-role`)** | Global / IAM | Least-privilege service role assumed by `backup.amazonaws.com` with managed backup and restore execution policies. |
+| **Clean Decommissioning Audit (Task 20)** | Account / Regional (`us-east-1`) | Systematic S3 version purging (4,658 objects), Backup Governance Vault Lock unlock, recovery point deletion, and Terraform destroy leaving 0 active resources and empty state. |
+
+---
+
+## 10. Decommissioned State & Post-Destroy Billing Considerations
+
+### 10.1. Active vs. Decommissioned Infrastructure State
+To reconcile architectural documentation with the current cloud environment:
+- **Codified Architecture:** The Terraform configuration in `terraform/` represents the fully tested architecture. It is version-controlled, immutable, and preserved intact for evaluation and reproducibility.
+- **Runtime Environment:** The live cloud infrastructure has been cleanly destroyed. Zero compute instances, zero load balancers, zero relational databases, and zero storage buckets remain active in the AWS account.
+
+### 10.2. Billing Telemetry Latency & Delayed Charges
+As part of the Task 20 audit, an AWS Cost Explorer query for October 2026 was performed:
+- **Recorded UnblendedCost:** `-0.000000369 USD` (`Estimated=true`).
+- **Service-Level Cost Query:** Returned no rows above the reporting threshold.
+
+> [!WARNING]
+> **Billing Telemetry Aggregation Latency:**
+> A zero or negative query in AWS Cost Explorer immediately following resource teardown **must not be interpreted as a final zero bill**.
+> - **Aggregation Latency:** AWS Cost Explorer exhibits an inherent 24- to 48-hour delay in ingesting, processing, and aggregating usage records across AWS service metering pipelines.
+> - **Trailing Usage Records:** Final metrics, such as CloudWatch Logs ingestion, CloudTrail event delivery, S3 API requests, and fractional hourly compute/endpoint uptime incurred prior to destruction, require up to 48 hours to appear on billing dashboards.
+> - **Operational Recommendation:** Operators should perform follow-up billing reviews 48–72 hours after teardown and upon final monthly invoice close to verify that all charges have ceased.

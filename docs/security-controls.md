@@ -1,12 +1,14 @@
 # Security Controls Matrix — Secure AWS Web Platform
 
-This document serves as the primary security compliance audit reference for the platform. It details each security control implemented across **Tasks 1–18**, identifying the governing AWS service, the threat or attack vector mitigated, the implementation mechanism in Terraform, and the verifying screenshot evidence.
+This document serves as the primary security compliance audit reference for the platform. It details each security control implemented and validated across **Tasks 1–20**, identifying the governing AWS service, the threat or attack vector mitigated, the implementation mechanism in Terraform, the verifying evidence, and the final decommissioning status.
 
-Unimplemented controls scheduled for **Tasks 19–20** are clearly designated as **Pending Implementation** at the conclusion of this document.
+> [!IMPORTANT]
+> **Complete Task Lifecycle & Decommissioning Status:**
+> All 20 project tasks have been completed and verified. Following the empirical validation of Tasks 1–19, **Task 20 (Final Security Audit & Clean Destroy)** was executed to prevent ongoing cloud charges. All 141 provisioned infrastructure resources were destroyed, and post-destroy verification confirmed zero active resources remaining. The reproducible Terraform codebase remains intact in `terraform/`.
 
 ---
 
-## 1. Security Controls Master Table (Tasks 1–18)
+## 1. Security Controls Master Table (Tasks 1–20)
 
 | Control ID | Security Control | AWS Service | Threat Mitigated | Terraform Implementation | Verifying Screenshot | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -29,6 +31,7 @@ Unimplemented controls scheduled for **Tasks 19–20** are clearly designated as
 | **SEC-17** | **Event-Driven Security Auto-Remediation** | AWS Lambda, EventBridge, CloudTrail & SNS | Rogue or accidental security group modification exposing sensitive ports (TCP 22 SSH, TCP 3389 RDP) to the public internet (`0.0.0.0/0`); zero-day exposure windows. | EventBridge rule `depi-sec-remediate-open-ssh` triggers on CloudTrail `AuthorizeSecurityGroupIngress`. Python 3.12 Lambda `depi-sec-auto-remediation` assumed by least-privilege role `depi-sec-lambda-remediation-role` (strictly scoped to `ec2:DescribeSecurityGroups`, `ec2:RevokeSecurityGroupIngress` on `depi-sec-app-sg`, and `sns:Publish` on `depi-sec-alerts`). Validates event, verifies `TARGET_SECURITY_GROUP_ID`, revokes only `0.0.0.0/0` (preserving port 80 from ALB SG and internal CIDRs), handles duplicate/conflict events via active rule re-inspection, logs structured telemetry, and dispatches incident alert email. | [`17-b-rule-removed.png`](../screenshots/17-lambda/17-b-rule-removed.png)<br>[`17-c-lambda-log.png`](../screenshots/17-lambda/17-c-lambda-log.png)<br>[`17-d-sns-email.png`](../screenshots/17-lambda/17-d-sns-email.png)<br>*(Note: `17-a-rule-added.png` omitted; rule remediated live before manual capture)* | **Verified** |
 | **SEC-18** | **Isolated Management Network (VPC Peering)** | AWS VPC Peering & Amazon EC2 | Direct public access for operations; unsegmented administrative tools; unauthorized ingress to application tier. | `depi-sec-tools-vpc` (`10.1.0.0/16`) connected via same-account VPC peering `pcx-066a78d3ee36e18f9`. Private route tables route inter-VPC traffic. `depi-sec-tools-sg` enforces discrete egress (TCP 80, TCP 443, ICMP to `10.0.11.0/24` & `10.0.12.0/24`). `depi-sec-private-nacl` enforces stateless rules 150–152 (inbound) and 150–151 (outbound ephemeral/ICMP reply). Keyless SSM management shares App VPC interface endpoints. | [`18-peering-active.png`](../screenshots/18-peering/18-peering-active.png)<br>[`18-app-route-table.png`](../screenshots/18-peering/18-app-route-table.png)<br>[`18-tools-route-table.png`](../screenshots/18-peering/18-tools-route-table.png)<br>[`18-peering-curl-success.png`](../screenshots/18-peering/18-peering-curl-success.png) | **Verified** |
 | **SEC-19** | **Immutable Ransomware-Resistant Backups (Vault Lock)** | AWS Backup | Ransomware encryption/extortion where attackers delete recovery points before executing payload; premature administrative deletion of backups. | `aws_backup_vault.backup_vault` (`depi-sec-vault`) + `aws_backup_vault_lock_configuration.vault_lock` in Governance Mode (`min_retention_days = 7`, `max_retention_days = 365`, `changeable_for_days` deliberately omitted) + `aws_backup_plan.backup_plan` (`cron(0 5 * * ? *)`, 30-day retention) + `aws_backup_selection.backup_selection` (`Project = depi-mini-project-1`). On-demand backup of EBS volume `vol-00fcab943dfdc091c` completed (job ID `07f99bc5-df7c-4124-8aa2-a9560997854f`, recovery point `snap-030ea42e05815a6e6`); deletion attempt via CLI rejected with `InvalidRequestException: RecoveryPoint cannot be deleted or updated (Backup vault configured with Lock)`. | [`19-backup-vault-locked.png`](../screenshots/19-backup/19-backup-vault-locked.png)<br>[`19-backup-job-completed.png`](../screenshots/19-backup/19-backup-job-completed.png)<br>[`19-recovery-point-delete-refused.png`](../screenshots/19-backup/19-recovery-point-delete-refused.png) | **Verified (Governance Lock & WORM Enforcement)** |
+| **SEC-20** | **Final Security Audit & Clean Teardown** | Terraform CLI & AWS CLI | Unmonitored lingering infrastructure, resource leakage, orphan ENIs/volumes, runaway post-project costs. | Systematic pre-destroy cleanup (S3 version purging of 4,658 objects, Backup Governance Vault Lock unlock, recovery point deletion) followed by `terraform destroy` (141 resources destroyed, empty state). Post-destroy AWS CLI audit confirming zero lingering resources across EC2, RDS, VPC, CloudFront, Backup, CloudTrail, and S3. | State empty (141 destroyed); EC2 terminated; RDS `DBInstanceNotFound`; S3 absent (4,658 versions cleared); CloudFront `NoSuchDistribution`; Backup vault/plan removed; Cost Explorer October 2026 `-0.000000369 USD` (`Estimated=true`) | **Verified (Clean Teardown)** |
 
 
 ---
@@ -241,20 +244,36 @@ An error occurred (InvalidRequestException) when calling the DeleteRecoveryPoint
 - Because `terraform-admin` holds administrator privileges, IAM authorization succeeded. The operation was evaluated and blocked directly by the **AWS Backup Vault Lock WORM engine**, returning `InvalidRequestException` referencing the active vault lock.
 - This confirms that immutability is enforced at the vault level, independent of IAM administrator rights.
 
-### 7.4. Task 20 Teardown Dependencies
-Because Terraform does not manage dynamically generated backup recovery points, executing `terraform destroy` directly on a vault containing recovery points results in `ResourceConflictException`. For Task 20:
-1. **Halt Scheduled Jobs:** Ensure no future scheduled backup runs trigger at `05:00 UTC`.
-2. **Review Recovery Points:** List and verify all recovery points in `depi-sec-vault`.
-3. **Remove Governance Lock (Requires Approval):** Run `aws backup delete-backup-vault-lock-configuration --backup-vault-name depi-sec-vault`.
-4. **Delete Test Recovery Points (Requires Approval):** Run `aws backup delete-recovery-point` for `snap-030ea42e05815a6e6`.
-5. **Terraform Destroy (Requires Approval):** Execute `terraform destroy` with an empty vault for a 100% clean teardown.
+### 7.4. Task 20 Teardown Execution & Dependency Resolution
+Because Terraform does not manage dynamically generated backup recovery points, executing `terraform destroy` directly on a vault containing recovery points results in `ResourceConflictException`. For Task 20, the following dependency protocol was systematically executed:
+1. **Halt Scheduled Jobs:** Verified no scheduled backup jobs were queued or running.
+2. **Review Recovery Points:** Inspected `depi-sec-vault` and identified active test recovery point `snap-030ea42e05815a6e6`.
+3. **Remove Governance Lock:** Executed `aws backup delete-backup-vault-lock-configuration --backup-vault-name depi-sec-vault` to remove the WORM policy.
+4. **Delete Test Recovery Point:** Executed `aws backup delete-recovery-point` for `snap-030ea42e05815a6e6`, confirming the vault was empty.
+5. **Purge S3 Bucket Versions:** Purged all 4,658 object versions and delete markers from `depi-sec-logs-75d8770a` and emptied `depi-sec-app-75d8770a`.
+6. **Execute Terraform Destroy:** Executed `terraform destroy`, cleanly destroying all 141 resources.
 
 ---
 
-## 8. Pending Security Controls (Task 20)
+## 8. Final Decommissioning & Security Audit Status (Task 20)
 
-With the successful deployment and empirical verification of **Tasks 1–19**, only the final project teardown and billing reconciliation task remains:
+With the successful deployment and empirical verification of **Tasks 1–19**, Task 20 was fully executed as the final security audit and clean decommissioning deliverable.
 
-| Task | Control | Planned AWS Service | Planned Threat Mitigation | Current Status |
-| :--- | :--- | :--- | :--- | :--- |
-| **Task 20** | **End-to-End Security Audit & Clean Destroy** | Terraform CLI & AWS Console | Unmonitored lingering infrastructure, resource leakage, cost overruns. | *Pending final execution after Task 19* |
+### 8.1. Decommissioning Verification Audit
+
+| Service / Resource | Post-Destroy Query / Command | Observed Result | Status |
+| :--- | :--- | :--- | :---: |
+| **Terraform State** | `terraform state list` | 0 resources returned (empty state) | **VERIFIED** |
+| **Terraform Destroy** | `terraform destroy` | `Destroy complete! Resources: 141 destroyed.` | **VERIFIED** |
+| **Amazon EC2** | `aws ec2 describe-instances` | All 3 instances (`depi-sec-app-a`, `depi-sec-app-b`, `depi-sec-tools-instance`) in `terminated` state | **VERIFIED** |
+| **Amazon RDS** | `aws rds describe-db-instances` | `DBInstanceNotFound: DBInstance depi-sec-db not found.` | **VERIFIED** |
+| **Amazon S3** | `aws s3api list-buckets` | Buckets `depi-sec-app-75d8770a` and `depi-sec-logs-75d8770a` completely absent | **VERIFIED** |
+| **S3 Version Purge** | `aws s3api list-object-versions` | Logs bucket: 4,658 object versions deleted with 0 errors; final check returned 0 versions and 0 delete markers | **VERIFIED** |
+| **AWS CloudFront** | `aws cloudfront get-distribution` | Distribution `EWLIRFI7B2MBM`: `NoSuchDistribution` | **VERIFIED** |
+| **AWS Backup** | `aws backup describe-backup-vault` | `depi-sec-vault` removed; backup plan and selection removed; recovery point `snap-030ea42e05815a6e6` deleted prior to vault removal | **VERIFIED** |
+| **AWS CloudTrail** | `aws cloudtrail describe-trails` | `depi-sec-trail` removed; CloudFront logs delivery removed | **VERIFIED** |
+
+### 8.2. Cost Explorer Reconciliation & Billing Limitations
+- **Recorded Cost Explorer Query:** October 2026 `UnblendedCost = -0.000000369 USD`, `Estimated=true`.
+- **Service-Level Query:** Returned zero rows above threshold.
+- **Billing Limitations Notice:** A zero or negative query in AWS Cost Explorer immediately following resource teardown **must not be interpreted as a final zero bill**. AWS Cost Explorer operates with a 24- to 48-hour metering latency. Minor delayed charges (such as CloudWatch Logs ingestion, CloudTrail event delivery, S3 API calls, and final prorated uptime) may appear in subsequent daily billing aggregations. Periodic monitoring over the subsequent 48–72 hours is standard operational hygiene until monthly invoice close.

@@ -1,8 +1,8 @@
-# Security Testing & Verification Report — Tasks 1–18
+# Security Testing & Verification Report — Tasks 1–20
 
-This document records the empirical validation of the security controls implemented in **Tasks 1–18**, following the standardized test framework outlined in **Task 20** of `Project-1.pdf`.
+This document records the empirical validation of the security controls implemented across **Tasks 1–20**, following the standardized test framework outlined in **Task 20** of `Project-1.pdf`.
 
-Each test case details the operational procedure performed, the expected security outcome, the observed real-world behavior, and links to the supporting screenshot evidence. Tests are strictly documented based on confirmed evidence without assuming or inferring unexecuted steps. Tests associated with **Tasks 19–20** that require pending infrastructure are explicitly identified as **Pending Implementation**.
+Each test case details the operational procedure performed, the expected security outcome, the observed real-world behavior, and links to the supporting screenshot evidence. Tests are strictly documented based on confirmed evidence without assuming or inferring unexecuted steps. All 20 project tasks, including the 10 operational tests and the final clean teardown and security audit, have been fully executed and verified.
 
 ---
 
@@ -20,6 +20,7 @@ Each test case details the operational procedure performed, the expected securit
 | **8** | Stop Nginx web service on one instance | ALB Target Group (`depi-sec-tg`) & CloudWatch Alarms | Target marked Unhealthy; traffic routes to healthy target; CloudWatch alarm fires; alert email sent | `app-a` marked Unhealthy in console; traffic served by `app-b`; CloudWatch alarm `depi-sec-alb-unhealthy-hosts` transitioned to `ALARM`; real SNS alert email received; `depi-sec-overview` dashboard captured spike to 1 and recovery to 0; returned to Healthy | **PASS** | [`12-alb-unhealthy-target.png`](../screenshots/12-alb/12-alb-unhealthy-target.png)<br>[`12-alb-failover-working.png`](../screenshots/12-alb/12-alb-failover-working.png)<br>[`12-alb-recovered.png`](../screenshots/12-alb/12-alb-recovered.png)<br>[`16-alarm-unhealthy-hosts.png`](../screenshots/16-cloudwatch/16-alarm-unhealthy-hosts.png)<br>[`16-alarm-email-notification.png`](../screenshots/16-cloudwatch/16-alarm-email-notification.png)<br>[`16-dashboard-overview.png`](../screenshots/16-cloudwatch/16-dashboard-overview.png) |
 | **9** | Curl app server from peering tools VPC | VPC Peering Connection (`pcx-066a78d3ee36e18f9`) | HTTP 200 via private route | Executed `curl -s -o /dev/null -w "%{http_code}" http://10.0.11.161` from Tools EC2 (`i-039ddfc570cb61341`); returned HTTP 200 OK over private route via active peering connection; direct external ALB access returned HTTP 403 Forbidden | **PASS** | [`18-peering-active.png`](../screenshots/18-peering/18-peering-active.png)<br>[`18-app-route-table.png`](../screenshots/18-peering/18-app-route-table.png)<br>[`18-tools-route-table.png`](../screenshots/18-peering/18-tools-route-table.png)<br>[`18-peering-curl-success.png`](../screenshots/18-peering/18-peering-curl-success.png) |
 | **10** | Delete recovery point in locked backup vault | AWS Backup Vault Lock (`depi-sec-vault`) | Recovery point deletion refused by Vault Lock policy | On-demand backup job `07f99bc5-df7c-4124-8aa2-a9560997854f` completed 100% for EBS volume `vol-00fcab943dfdc091c` (attached to `depi-sec-app-a`), generating recovery point snapshot `snap-030ea42e05815a6e6` with 7-day retention in `depi-sec-vault`; deletion attempt via AWS CLI was refused with `InvalidRequestException: RecoveryPoint cannot be deleted or updated (Backup vault configured with Lock)` | **PASS** | [`19-backup-vault-locked.png`](../screenshots/19-backup/19-backup-vault-locked.png)<br>[`19-backup-job-completed.png`](../screenshots/19-backup/19-backup-job-completed.png)<br>[`19-recovery-point-delete-refused.png`](../screenshots/19-backup/19-recovery-point-delete-refused.png) |
+| **11** | Final Security Audit & Clean Destroy (Task 20) | Cloud Account Infrastructure & Billing | All 141 resources cleanly destroyed; 0 state; empty residual cloud footprint | `terraform destroy` completed (141 destroyed); `state list` empty; all 3 EC2 instances terminated; RDS `DBInstanceNotFound`; S3 buckets absent (4,658 versions purged from logs bucket); CloudFront `NoSuchDistribution`; Backup vault/plan removed; trail and logs delivery removed; October 2026 Cost Explorer `UnblendedCost = -0.000000369 USD` (`Estimated=true`) | **PASS** | CLI verification outputs documented in Section 4 |
 
 ---
 
@@ -308,32 +309,74 @@ Each test case details the operational procedure performed, the expected securit
 
 ## 3. Task 20 Teardown Dependencies & Pre-Destroy Cleanup Protocol
 
-Before executing `terraform destroy` for Task 20, the following strict dependency sequence must be observed to prevent failed destroy operations and lingering costs:
+Before executing `terraform destroy` for Task 20, the following strict dependency sequence was systematically observed to prevent failed destroy operations and lingering costs:
 
-1. **Stop Future Scheduled Backup Jobs:** To prevent unexpected backup jobs from triggering at `05:00 UTC`, ensure teardown occurs prior to the schedule or disable the backup rule in `depi-sec-backup-plan`.
+1. **Halt Future Scheduled Backup Jobs:** Verified no scheduled backup jobs were queued or running at the 05:00 UTC schedule window.
 2. **Review Existing Backup Jobs & Recovery Points:** Inspect `depi-sec-vault` to catalog all existing recovery points and confirm no unmanaged backups exist:
    ```bash
    aws backup list-recovery-points-by-backup-vault --backup-vault-name depi-sec-vault
    ```
-3. **Remove Governance Vault Lock (Requires Explicit Approval):** Because `depi-sec-vault` is locked in Governance Mode (with `changeable_for_days` deliberately omitted), an authorized administrator can remove the lock configuration prior to cleanup:
+3. **Remove Governance Vault Lock:** Because `depi-sec-vault` was locked in Governance Mode (with `changeable_for_days` deliberately omitted), the lock configuration was removed:
    ```bash
    aws backup delete-backup-vault-lock-configuration --backup-vault-name depi-sec-vault
    ```
-4. **Delete Test Recovery Points (Requires Explicit Approval):** AWS Backup blocks vault deletion if any recovery points remain inside (`ResourceConflictException: Backup vault cannot be deleted. There are recovery points in this backup vault`). Delete only explicitly identified test recovery points:
+4. **Delete Test Recovery Point:** Deleted test recovery point `snap-030ea42e05815a6e6` to prevent `ResourceConflictException`:
    ```bash
    aws backup delete-recovery-point \
      --backup-vault-name depi-sec-vault \
      --recovery-point-arn "arn:aws:ec2:us-east-1::snapshot/snap-030ea42e05815a6e6"
    ```
-5. **Perform Terraform Destroy (Requires Reviewed Plan & Explicit Approval):** Only after the vault is completely empty and S3 buckets are cleared of all object versions can `terraform destroy` run cleanly to remove all infrastructure.
+5. **Purge S3 Bucket Versions:** Purged all 4,658 object versions and delete markers from `depi-sec-logs-75d8770a` with zero errors, and emptied `depi-sec-app-75d8770a`.
+6. **Perform Terraform Destroy:** With the vault emptied and S3 buckets cleared, executed `terraform destroy` to remove all infrastructure cleanly:
+   ```bash
+   terraform destroy
+   ```
 
 ---
 
-## 4. Pending Security Test Cases (Task 20)
+## 4. Task 20: Final Security Audit & Clean Destroy Verification
 
-With the successful completion and empirical verification of **Tasks 1–19**, all ten security tests in the standardized matrix are verified. The sole remaining deliverable is:
+Task 20 represents the final project deliverable: executing a systematic cloud decommissioning, auditing the environment to verify zero lingering infrastructure, and evaluating post-destroy billing telemetry.
 
-- **Task 20: Clean Platform Teardown & Post-Destroy Billing Verification**
-  - *Procedure:* Execute S3 version purges, AWS Backup recovery point cleanup, Governance Vault Lock removal, `terraform destroy`, and final Cost Explorer verification.
-  - *Expected Result:* Zero resources remaining in AWS account; Cost Explorer confirms clean teardown.
-  - *Status:* **Pending Final Execution (Task 20).**
+### 4.1. Empirical Audit Evidence & Observed Results
+1. **Terraform Destroy Execution:**
+   - Command: `terraform destroy`
+   - Output: `Destroy complete! Resources: 141 destroyed.`
+2. **Terraform State Verification:**
+   - Command: `terraform state list`
+   - Output: Empty (0 resources managed).
+3. **EC2 Compute Workload Audit:**
+   - Command: `aws ec2 describe-instances`
+   - Result: All 3 project EC2 instances (`depi-sec-app-a`, `depi-sec-app-b`, `depi-sec-tools-instance`) confirmed in `terminated` state. Zero running instances.
+4. **Relational Database Audit:**
+   - Command: `aws rds describe-db-instances --db-instance-identifier depi-sec-db`
+   - Result: `An error occurred (DBInstanceNotFound) when calling the DescribeDBInstances operation: DBInstance depi-sec-db not found.`
+5. **S3 Object Storage Audit:**
+   - Command: `aws s3api list-buckets`
+   - Result: Both project buckets (`depi-sec-app-75d8770a` and `depi-sec-logs-75d8770a`) absent from account.
+   - Version Purge Verification: Prior to bucket deletion, `depi-sec-logs-75d8770a` had 4,658 object versions deleted with zero errors; final pre-deletion check confirmed 0 versions and 0 delete markers.
+6. **CloudFront CDN Distribution Audit:**
+   - Command: `aws cloudfront get-distribution --id EWLIRFI7B2MBM`
+   - Result: `An error occurred (NoSuchDistribution) when calling the GetDistribution operation: The specified distribution does not exist.`
+7. **AWS Backup Audit:**
+   - Command: `aws backup describe-backup-vault --backup-vault-name depi-sec-vault`
+   - Result: `ResourceNotFoundException: Backup vault depi-sec-vault not found.`
+   - Plan & Selection: Plan `depi-sec-backup-plan` and selection `depi-sec-backup-selection` removed. Recovery point `snap-030ea42e05815a6e6` confirmed deleted prior to vault destruction.
+8. **CloudTrail & CloudWatch Logs Delivery Audit:**
+   - Command: `aws cloudtrail describe-trails --trail-name-list depi-sec-trail`
+   - Result: `depi-sec-trail` removed. CloudFront logs delivery mechanism removed and verified.
+### 4.2. Post-Destroy Billing Audit (AWS Cost Explorer)
+
+An audit query was executed via AWS Cost Explorer for October 2026:
+- **Total Unblended Cost:** `-0.000000369 USD` (`Estimated=true`).
+- **Service-Level Cost Query:** Returned no rows above the specified reporting threshold.
+### 4.3. Billing Telemetry Limitations & Delayed Charges Analysis
+
+> [!WARNING]
+> **Billing Telemetry Aggregation Latency:**
+> A zero or negative query in AWS Cost Explorer immediately following resource destruction **must not be interpreted as a final zero bill**:
+> 1. **Aggregation Latency:** AWS Cost Explorer exhibits an inherent 24- to 48-hour delay in ingesting, processing, and aggregating usage records from various service metering pipelines into billing datasets.
+> 2. **Trailing Usage Records:** Final metrics, such as CloudWatch Logs ingestion, CloudTrail management/data event auditing, S3 API requests, and fractional hourly compute/load balancer/endpoint uptime incurred prior to destruction, require up to 48 hours to appear in billing reports.
+> 3. **Operational Recommendation:** Operators should perform follow-up billing reviews 48–72 hours after teardown and upon final monthly invoice close to verify that all charges have ceased.
+
+- **Status:** **PASS (100% Decommissioned & Audited)**
